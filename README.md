@@ -27,6 +27,25 @@ npm --prefix server run start       # http://127.0.0.1:8787
 - **评测**：案例集（按场景绑定 workspace）→ 真实引擎跑 → rubric/LLM 裁判 → 通过率/均分/成本/耗时 + 趋势图；可导出 evalplat JSON，或由 evalplat 用 `rubric` 算子反向驱动。
 - **设置**：模型发现、限额（任务时限/费用上限/并发/卡住）、Mock/真实引擎切换。
 
+## 截图
+
+> 截图由无头 Chrome 生成；应用支持 `?tab=data|eval` 与 `?settings=1` 直达对应页面。
+
+**协作台** —— 一句话拆解 → 多智能体并行只读排查 → 证据校验 → 主 Pi 仲裁
+![协作台](docs/screenshots/workspace.png)
+
+**评测** —— rubric / LLM 裁判，含通过率 / 均分 / 成本 / 耗时趋势
+![评测](docs/screenshots/eval.png)
+
+**数据中台** —— 资料版本库（导入 / 快照 / 去重 / 升版本 / 回溯）
+![数据中台](docs/screenshots/data.png)
+
+**引擎设置** —— 模型发现、限额、Mock/真实引擎切换
+![设置](docs/screenshots/settings.png)
+
+**evalplat 看板** —— 真实引擎下的多智能体运行趋势
+![evalplat 看板](docs/screenshots/evalplat.png)
+
 ## 技术栈 / 目录
 
 - `server/`：Node + TypeScript + Express + `node:sqlite`（任务/资料/设置持久化）。

@@ -174,9 +174,12 @@ export default function App() {
   const [task, setTask] = useState<Task | null>(null);
   const [history, setHistory] = useState<TaskSummary[]>([]);
   const [loading, setLoading] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState<boolean>(() => new URLSearchParams(window.location.search).get("settings") === "1");
   const [engine, setEngine] = useState<string>("mock");
-  const [tab, setTab] = useState<"workspace" | "eval" | "data">("workspace");
+  const [tab, setTab] = useState<"workspace" | "eval" | "data">(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    return t === "eval" || t === "data" ? t : "workspace";
+  });
   const esRef = useRef<EventSource | null>(null);
 
   async function refreshHistory() {
