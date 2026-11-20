@@ -1,5 +1,7 @@
 # Pi 多智能体协作台
 
+![CI](https://github.com/Bugengin/mogai-pi-multiagent/actions/workflows/ci.yml/badge.svg)
+
 > 用真实大模型（pi 引擎）做「多智能体只读排查 + 证据自动校验 + 主 Pi 真实仲裁」的本地 Web 工作台；附带数据中台（资料版本库）与评测中台联动的本地评测（rubric / LLM 裁判）。
 
 ## 快速启动
