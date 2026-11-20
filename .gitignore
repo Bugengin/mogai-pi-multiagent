@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.DS_Store
+server/.data/
+*.log
+!demo-workspace/logs/*.log
+!demo-api/logs/*.log
+!demo-report/logs/*.log

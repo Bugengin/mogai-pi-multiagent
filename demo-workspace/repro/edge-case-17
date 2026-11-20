@@ -1,0 +1,1 @@
+edge-case-17 repro: input=null triggers fallback

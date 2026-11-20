@@ -1,0 +1,7 @@
+[
+  { "id": "o1", "status": "PAID", "amount": 120 },
+  { "id": "o2", "status": "SHIPPED", "amount": 80 },
+  { "id": "o3", "status": "CANCELLED", "amount": 40 },
+  { "id": "o4", "status": "PAID", "amount": 200 },
+  { "id": "o5", "status": "SHIPPED", "amount": 35 }
+]
