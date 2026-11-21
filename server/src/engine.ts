@@ -147,23 +147,6 @@ export function resultFor(goal: string, sub: { id: string; scope: string }): Sub
   };
 }
 
-/**
- * 真实 pi 接入点（占位）。
- * 目标：用 @earendil-works/pi-coding-agent 的 createAgentSession / AgentSessionRuntime
- * 为每个子任务创建一个受限会话（只读工具），订阅事件流映射为 progress，
- * 从最终 assistant message 解析结构化结果。缺少模型凭据时返回 null，回落到 mock。
- */
-export async function tryLoadPi(): Promise<unknown | null> {
-  try {
-    // 用变量模块名，避免未安装时 tsc 报“找不到模块”；运行时未安装会走 catch 回落 mock。
-    const pkgName = "@earendil-works/pi-coding-agent";
-    const mod = await import(pkgName);
-    return mod;
-  } catch {
-    return null;
-  }
-}
-
 export interface CandidateSeed {
   id: string;
   title: string;

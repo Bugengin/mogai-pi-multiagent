@@ -220,6 +220,7 @@ app.post("/api/diag/once", async (req, res) => {
         confidence: task.verdict ? task.verdict.confidence : "inconclusive",
         materialVersion: task.materialVersion ?? null,
         evidenceRoot: task.evidenceRoot ?? null,
+        workspaceFingerprint: task.workspaceFingerprint ?? null,
       },
       usage: { cost_usd: task.spentUsd || 0, tokens: task.spentTokens || 0, latency_ms: Date.now() - started }
     });

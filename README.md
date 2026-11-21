@@ -73,7 +73,7 @@ npm --prefix server run start       # http://127.0.0.1:8787
 - 每个子任务可**单独停止 / 重试**，互不影响。
 - 主 Pi 面板：结论、置信度、推理链、**判别性检查**、仍未解决项。
 - 默认内置一个「导出文件为空」演示场景（两个子 agent 结论冲突 → 主 Pi 仲裁），方便验证整条链路。
-- 当前引擎是 **mock（确定性脚本）**，不消耗模型额度；真实 pi SDK 接入点已预留（见下）。
+- 当前引擎是 **mock（确定性脚本）**，不消耗模型额度；真实 pi SDK 接入见 `server/src/piEngine.ts`。
 
 ## 目录结构
 
@@ -82,7 +82,8 @@ pi/
   package.json         # 根脚本（concurrently 同时起 server+web）
   server/              # Node + Express + TS
     src/types.ts       # 领域模型（Task/Subtask/Evidence/Verdict）
-    src/engine.ts      # 规划/步骤/结果 生成 + 真实 pi SDK 接入点(tryLoadPi)
+    src/engine.ts      # 规划/步骤/结果 生成
+    src/piEngine.ts    # 真实 pi SDK 接入（主 Pi 拆解/仲裁 + 子会话运行）
     src/orchestrator.ts# 编排器：状态机 / 并行 / 停止 / 重试 / 仲裁
     src/index.ts       # REST + SSE 服务（127.0.0.1:8787）
   web/                 # React + Vite + TS
@@ -110,15 +111,15 @@ npm run dev           # 同时启动后端(8787) + 前端(5173)
 | POST | /api/tasks/:id/subtasks/:sid/stop | 停止某子任务 |
 | POST | /api/tasks/:id/subtasks/:sid/retry | 重试某子任务 |
 
-## 接入真实 pi（下一步）
+## 接入真实 pi（实现要点，代码在 piEngine.ts）
 
 1. `npm --prefix server install @earendil-works/pi-coding-agent`（Node 22.19+，当前 Node 24 满足）。
-2. 在 `server/src/engine.ts` 的 `tryLoadPi()` 基础上实现：
+2. 在 `server/src/piEngine.ts` 中实现（已直接使用 @earendil-works/pi-coding-agent 的 createAgentSession / AgentSessionRuntime）：
    - 主 Pi：一个 `AgentSession`，负责任务拆解与仲裁。
    - 子 agent：用 `AgentSessionRuntime.newSession()`（或 fork）为每个子任务建**独立会话**，**只给只读工具**（`tools/noTools/excludeTools` 里排除 write/edit，禁止裸 bash，改用受控只读 shell）。
    - 订阅 `session.subscribe(...)` 的 `message_update / tool_execution / agent_settled` 事件，映射为 pane 的 progress；从最终 assistant message 解析结构化 `SubtaskResult`。
    - 停止/重试用 `session.abort()`；每个子会话持久化（SessionManager）→ 天然审计链。
-3. 需要模型凭据（`/login` 或 API key），无凭据时自动回落到 mock。
+3. 需要模型凭据（`/login` 或 API key）。注意：当引擎为真实 Pi 且缺少凭据时，子任务会直接失败，**不会回退 mock**；mock 只在显式选择演示模式时使用。
 
 ## 安全/可信红线（别省）
 
@@ -163,6 +164,16 @@ npm run dev           # 同时启动后端(8787) + 前端(5173)
 - **卡住判定** `stuckSeconds`（默认 90s）：子任务超过该时长无任何进展 → 标记 stuck 并 `session.abort()` 真中断。
 
 任务条会显示本次消耗（$ 与 tokens）。
+
+## 历史任务重试的安全校验
+
+重试历史任务（尤其是进程重启后从库里恢复的任务）前，会先核对当前配置与该任务创建时是否一致，任一项变化即拒绝并提示「用当前配置新建任务」：
+- 引擎、供应商、模型、Base URL；
+- 工作区/资料快照的路径与内容指纹（`workspaceFingerprint`）；
+- 凭据指纹（`credentialFingerprint`，只存 `provider+apiKey` 的 sha256，不落明文密钥）——换了 API Key 也会拒绝。
+
+这样可避免旧任务在配置或密钥已变的情况下继续运行，产出对不上的记录。注：本次升级前创建的旧任务未记录凭据指纹，无法比对 Key 是否更换，建议这类任务改用当前配置新建。
+
 ## A. 评测中台联动（本地评测）+ B. 案例沉淀 + C. 测试（本轮新增）
 
 - **导航新增「评测」页**：内置 demo 案例集，一键运行 → 通过率 / 平均分 / 总成本 / 平均耗时 + 逐条命中/缺失。
@@ -170,7 +181,7 @@ npm run dev           # 同时启动后端(8787) + 前端(5173)
 - 存储：`server/.data/eval_cases.json`（案例集）、`server/.data/eval_runs.json`（历史，保留最近 50 次）。
 - **B 数据中台联动**：历史排查任务（tasks/子会话/证据已持久化=数据仓库）可在评测页「加入评测集」——填期望根因关键词，沉淀成回归用例。
 - 接口：`GET/POST /api/eval/cases`、`POST /api/eval/run`、`GET /api/eval/runs`、`GET /api/eval/runs/:id`。
-- **C 测试**：`server/test/core.test.ts`，运行 `npm --prefix server test`（7 项，覆盖证据校验与评分口径）。
+- **C 测试**：`npm --prefix server test` 跑三组共 21 项：`core.test.ts`（8 项，证据校验与评分口径）、`data.test.ts`（4 项）、`orchestrator.test.ts`（9 项，停止/重试/工作区快照与凭据校验）。
 - 说明：demo 案例的关键词是按 mock 输出设的，用于验证链路；接真实 pi 后应按真实根因重设。指标口径与 evalplat 一致，后续可把本评测结果导出为 evalplat JSON 报告做统一看板。
 ## 真正接 evalplat（本轮新增）
 
@@ -178,7 +189,7 @@ npm run dev           # 同时启动后端(8787) + 前端(5173)
   接口：`GET /api/eval/runs/:id/export`。
 - **导出数据集**：`GET /api/eval/datasets/evalplat?dataset=demo` → evalplat Dataset JSON（`expected.key_points.field = rootCause`，算子里程碑一致）。
 - **让 evalplat 直接驱动本系统**：
-  - 单条诊断接口 `POST /api/diag/once { goal }` → `{ output: {rootCause, confidence}, usage }`。
+  - 单条诊断接口 `POST /api/diag/once { goal }` → `{ output: { rootCause, confidence, materialVersion, evidenceRoot, workspaceFingerprint }, usage }`。
   - 命令适配器脚本 `server/scripts/subject-cli.mjs`（stdin 读 JSON → 调本服务 → stdout 写 JSON）。
   - 用法（evalplat 需按其安全模型**开启命令适配器**）：
     ```

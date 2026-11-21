@@ -68,6 +68,7 @@ export interface Task {
   evidenceRoot?: string;
   materialVersion?: string;
   workspaceFingerprint?: string;
+  credentialFingerprint?: string;
   engine?: "mock" | "pi";
   provider?: string;
   modelId?: string;

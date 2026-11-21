@@ -36,7 +36,11 @@ function treeFingerprint(root: string): string {
     return "";
   }
 }
-type RunToken = { taskId: string; subId: string; attempt: number; cancelled: boolean; abort?: () => void };
+function credentialFingerprint(settings: EngineSettings): string {
+  // 只存凭据的哈希版本，不落明文密钥；用于跨进程重试时识别 Key 是否更换。
+  return createHash("sha256").update((settings.provider || "") + "\n" + (settings.apiKey || "")).digest("hex");
+}
+type RunToken = { attempt: number; abort?: () => void };
 type Watch = { deadline: ReturnType<typeof setTimeout>; stuck: ReturnType<typeof setInterval> };
 
 export interface CreateTaskInput {
@@ -61,24 +65,22 @@ export class Orchestrator {
     private getSettings: () => EngineSettings
   ) {}
 
-  private tokenKey(taskId: string, subId: string, attempt: number): string {
-    return taskId + ":" + subId + ":" + attempt;
-  }
-  private progressKey(taskId: string, subId: string, attempt: number): string {
+  private key(taskId: string, subId: string, attempt: number): string {
     return taskId + ":" + subId + ":" + attempt;
   }
   private settingsFor(task: Task): EngineSettings {
     return this.taskSettings.get(task.id) || this.getSettings();
   }
   private ensureTaskSettings(task: Task): EngineSettings {
-    const existing = this.taskSettings.get(task.id);
-    if (existing) return existing;
     const current = this.getSettings();
     const mismatches: string[] = [];
     if (task.engine && task.engine !== current.engine) mismatches.push("引擎 " + task.engine + " -> " + current.engine);
     if (task.provider && task.provider !== current.provider) mismatches.push("供应商 " + task.provider + " -> " + current.provider);
     if (task.modelId && task.modelId !== current.modelId) mismatches.push("模型 " + task.modelId + " -> " + current.modelId);
     if ((task.baseUrl || "") !== (current.baseUrl || "")) mismatches.push("Base URL 已变化");
+    if (task.credentialFingerprint && task.credentialFingerprint !== credentialFingerprint(current)) {
+      mismatches.push("API Key/凭据已变化");
+    }
     const currentRoot = this.resolveWorkspace(task.workspace);
     if (task.evidenceRoot && currentRoot !== task.evidenceRoot) mismatches.push("工作区/资料快照路径已变化");
     if (task.workspaceFingerprint) {
@@ -93,16 +95,18 @@ export class Orchestrator {
     if (current.engine === "pi" && (!current.apiKey || !current.modelId)) {
       throw new Error("当前真实 Pi 配置不完整（缺少 API Key 或模型），无法重试历史任务");
     }
+    const cached = this.taskSettings.get(task.id);
+    if (cached) return cached;
     this.taskSettings.set(task.id, { ...current });
     return this.taskSettings.get(task.id)!;
   }
   private currentToken(task: Task, sub: Subtask): RunToken | undefined {
-    return this.tokens.get(this.tokenKey(task.id, sub.id, sub.attempt || 1));
+    return this.tokens.get(this.key(task.id, sub.id, sub.attempt || 1));
   }
   private isCurrentAttempt(task: Task, sub: Subtask, token: RunToken): boolean {
     return sub.status === "running"
       && (sub.attempt || 1) === token.attempt
-      && this.tokens.get(this.tokenKey(task.id, sub.id, token.attempt)) === token;
+      && this.tokens.get(this.key(task.id, sub.id, token.attempt)) === token;
   }
 
   private fire(taskId: string, ev: ServerEvent): void {
@@ -182,6 +186,7 @@ export class Orchestrator {
       evidenceRoot,
       materialVersion: materialMatch ? materialMatch[1] : undefined,
       workspaceFingerprint: treeFingerprint(evidenceRoot),
+      credentialFingerprint: credentialFingerprint(settings),
       engine: settings.engine,
       provider: settings.provider,
       modelId: settings.modelId,
@@ -296,13 +301,12 @@ export class Orchestrator {
       let changed = false;
       for (const sub of task.subtasks) {
         if (sub.status !== "running") continue;
-        const last = this.progressAt.get(this.progressKey(task.id, sub.id, sub.attempt || 1)) || sub.startedAt || now;
+        const last = this.progressAt.get(this.key(task.id, sub.id, sub.attempt || 1)) || sub.startedAt || now;
         if (now - last > stuckSec * 1000) {
           sub.status = "stuck";
           sub.endedAt = now;
           const tok = this.currentToken(task, sub);
           if (tok) {
-            tok.cancelled = true;
             if (tok.abort) { try { tok.abort(); } catch { /* ignore */ } }
           }
           this.emitSub(task, sub);
@@ -335,7 +339,6 @@ export class Orchestrator {
         sub.endedAt = Date.now();
         const tok = this.currentToken(task, sub);
         if (tok) {
-          tok.cancelled = true;
           if (tok.abort) { try { tok.abort(); } catch { /* ignore */ } }
         }
         this.emitSub(task, sub);
@@ -360,9 +363,9 @@ export class Orchestrator {
     sub.result = undefined;
     sub.startedAt = Date.now();
     sub.endedAt = undefined;
-    const token: RunToken = { taskId: task.id, subId: sub.id, attempt: sub.attempt, cancelled: false };
-    this.tokens.set(this.tokenKey(task.id, sub.id, token.attempt), token);
-    this.progressAt.set(this.progressKey(task.id, sub.id, token.attempt), Date.now());
+    const token: RunToken = { attempt: sub.attempt };
+    this.tokens.set(this.key(task.id, sub.id, token.attempt), token);
+    this.progressAt.set(this.key(task.id, sub.id, token.attempt), Date.now());
     this.emitSub(task, sub);
     void this.runLoop(task, sub, token);
   }
@@ -370,7 +373,7 @@ export class Orchestrator {
   private pushProgress(task: Task, sub: Subtask, msg: string, token?: RunToken): void {
     if (token && !this.isCurrentAttempt(task, sub, token)) return;
     sub.progress.push(msg);
-    this.progressAt.set(this.progressKey(task.id, sub.id, sub.attempt || 1), Date.now());
+    this.progressAt.set(this.key(task.id, sub.id, sub.attempt || 1), Date.now());
     this.fire(task.id, { type: "log", taskId: task.id, subtaskId: sub.id, message: msg });
     this.emitSub(task, sub);
   }
@@ -421,11 +424,9 @@ export class Orchestrator {
     this.maybeAdjudicate(task);
   }
 
-  private failSubtask(task: Task, sub: Subtask, token: RunToken, reason: string, partial?: SubtaskResult): void {
+  private failSubtask(task: Task, sub: Subtask, token: RunToken, reason: string): void {
     if (!this.isCurrentAttempt(task, sub, token)) return;
-    const res: SubtaskResult = partial
-      ? { ...partial, doubts: [...(partial.doubts || [])] }
-      : { conclusion: "inconclusive", summary: "运行失败：" + reason, evidence: [], doubts: [], cost: { tokens: 0, usd: 0 } };
+    const res: SubtaskResult = { conclusion: "inconclusive", summary: "运行失败：" + reason, evidence: [], doubts: [], cost: { tokens: 0, usd: 0 } };
     if (!res.doubts.includes(reason)) res.doubts.push(reason);
     sub.result = res;
     sub.status = "failed";
@@ -463,7 +464,7 @@ export class Orchestrator {
     }
   }
 
-  private async runMock(task: Task, sub: Subtask, token: RunToken, note?: string): Promise<void> {
+  private async runMock(task: Task, sub: Subtask, token: RunToken): Promise<void> {
     const steps = stepsFor(task.goal, sub);
     for (const step of steps) {
       await sleep(step.delay);
@@ -472,7 +473,6 @@ export class Orchestrator {
     }
     if (!this.isCurrentAttempt(task, sub, token)) return;
     const res = resultFor(task.goal, sub);
-    if (note) res.doubts.push(note);
     this.finishSubtask(task, sub, res, token);
   }
 
@@ -483,7 +483,6 @@ export class Orchestrator {
     if (!sub) return;
     const token = this.currentToken(task, sub);
     if (token) {
-      token.cancelled = true;
       if (token.abort) { try { token.abort(); } catch { /* ignore */ } }
     }
     if (sub.status === "running") {
@@ -504,7 +503,6 @@ export class Orchestrator {
       if (sub.status === "running" || sub.status === "pending") {
         const token = this.currentToken(task, sub);
         if (token) {
-          token.cancelled = true;
           if (token.abort) { try { token.abort(); } catch { /* ignore */ } }
         }
         sub.status = "stopped";

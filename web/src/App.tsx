@@ -41,7 +41,6 @@ function isTerminal(s: string): boolean {
 }
 
 function AgentPane(props: {
-  taskId: string;
   sub: Subtask;
   onStop: (sid: string) => void;
   onRetry: (sid: string) => void;
@@ -421,7 +420,7 @@ export default function App() {
           <div>
             <div className="grid">
               {task.subtasks.map((s) => (
-                <AgentPane key={s.id} taskId={task.id} sub={s} onStop={onStop} onRetry={onRetry} />
+                <AgentPane key={s.id} sub={s} onStop={onStop} onRetry={onRetry} />
               ))}
             </div>
             <VerdictPanel task={task} />

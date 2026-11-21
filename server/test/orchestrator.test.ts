@@ -103,3 +103,51 @@ test("stopSubtask isolates tasks with identical subtask ids", async () => {
   assert.equal(b1.status, "done", "other task subtask should finish normally");
   assert.equal(b1.progress.length, 4, "other task should keep its progress");
 });
+
+test("retry in same process is rejected after workspace path changes (cached settings must not skip verification)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ws-cache-"));
+  const wsA = path.join(dir, "a");
+  const wsB = path.join(dir, "b");
+  fs.mkdirSync(wsA); fs.mkdirSync(wsB);
+  fs.writeFileSync(path.join(wsA, "f.txt"), "a", "utf8");
+  fs.writeFileSync(path.join(wsB, "f.txt"), "b", "utf8");
+  const db = path.join(dir, "pi.db");
+  const settings: any = { engine: "mock", provider: "openai", modelId: "gpt-4.1", apiKey: "", maxTaskSeconds: 30, maxCostUsd: 1.5, maxConcurrency: 2, stuckSeconds: 20 };
+  let ws = wsA;
+  const orch = new Orchestrator(new Store(db), () => ws, () => settings);
+  const task = orch.createTask({ goal: "导出文件为空，帮我查一下原因" });
+  await sleep(50);
+  orch.stopTask(task.id);
+  ws = wsB;
+  const error = orch.retrySubtask(task.id, "s1");
+  assert.ok(String(error || "").includes("工作区/资料快照路径已变化"), "same-process retry must be rejected after workspace path changes");
+});
+
+test("retry in same process is rejected after workspace content changes", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ws-cache-content-"));
+  const ws = path.join(dir, "ws");
+  fs.mkdirSync(ws);
+  fs.writeFileSync(path.join(ws, "f.txt"), "v1", "utf8");
+  const db = path.join(dir, "pi.db");
+  const settings: any = { engine: "mock", provider: "openai", modelId: "gpt-4.1", apiKey: "", maxTaskSeconds: 30, maxCostUsd: 1.5, maxConcurrency: 2, stuckSeconds: 20 };
+  const orch = new Orchestrator(new Store(db), () => ws, () => settings);
+  const task = orch.createTask({ goal: "导出文件为空，帮我查一下原因" });
+  await sleep(50);
+  orch.stopTask(task.id);
+  fs.writeFileSync(path.join(ws, "f.txt"), "v2", "utf8");
+  const error = orch.retrySubtask(task.id, "s1");
+  assert.ok(String(error || "").includes("工作区/资料快照内容已变化"), "same-process retry must be rejected after workspace content changes");
+});
+
+test("retry across process is rejected when API key changed", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-key-"));
+  const db = path.join(dir, "pi.db");
+  const ws = path.resolve(process.cwd(), "..", "demo-workspace");
+  const base: any = { engine: "mock", provider: "openai", modelId: "gpt-4.1", apiKey: "key-a", maxTaskSeconds: 30, maxCostUsd: 1.5, maxConcurrency: 2, stuckSeconds: 20 };
+  const orch = new Orchestrator(new Store(db), () => ws, () => base);
+  const task = orch.createTask({ goal: "导出文件为空，帮我查一下原因" });
+  const changed: any = { ...base, apiKey: "key-b" };
+  const orch2 = new Orchestrator(new Store(db), () => ws, () => changed);
+  const error = orch2.retrySubtask(task.id, "s1");
+  assert.match(String(error || ""), /API Key|凭据/);
+});
