@@ -136,6 +136,8 @@ body {
 .pill.recon, .pill.awaiting_pick { color: var(--accent-2); background: #f3efff; border-color: #e2d9ff; }
 .ev-ok { font-size: 11px; color: var(--ok); background: #ecf9f1; border-radius: 5px; padding: 1px 6px; margin-left: 8px; font-weight: 600; }
 .ev-bad { font-size: 11px; color: var(--err); background: #fdeeee; border-radius: 5px; padding: 1px 6px; margin-left: 8px; font-weight: 600; }
+.ev-support { display: block; color: var(--muted); margin-top: 4px; }
+.ev-reason { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
 .hist { margin: 8px 0 18px; }
 .hist-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow: auto; }
 .hist-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; cursor: pointer; text-align: left; font-size: 13px; color: var(--text); }

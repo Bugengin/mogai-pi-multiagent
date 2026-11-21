@@ -25,6 +25,7 @@ export interface EvalCaseResult {
   passed: boolean;
   method: "llm" | "keyword";
   judgeReason?: string;
+  materialVersion?: string;
   usd: number;
   ms: number;
 }
@@ -153,6 +154,7 @@ export class EvalService {
         passed,
         method,
         judgeReason,
+        materialVersion: task.materialVersion,
         usd: task.spentUsd || 0,
         ms
       });
@@ -195,7 +197,7 @@ export function toEvalplatReport(run: EvalRun, subjectName: string): unknown {
     score: r.score,
     scores: [{ operator: "root_cause_keywords", score: r.score, passed: r.passed, detail: { matched: r.matched, missed: r.missed } }],
     subject: {
-      output: { rootCause: r.actual, confidence: r.confidence },
+      output: { rootCause: r.actual, confidence: r.confidence, materialVersion: r.materialVersion || null },
       error: null,
       latency_ms: r.ms,
       cost_usd: r.usd,
@@ -227,6 +229,7 @@ export function toEvalplatReport(run: EvalRun, subjectName: string): unknown {
     dataset: run.dataset,
     dataset_hash: datasetHash,
     operators: ["root_cause_keywords"],
+    material_versions: Array.from(new Set(run.results.map((r) => r.materialVersion).filter(Boolean))) as string[],
     started_at: startedAt,
     finished_at: finishedAt,
     metrics,

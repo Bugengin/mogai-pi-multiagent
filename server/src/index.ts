@@ -215,7 +215,12 @@ app.post("/api/diag/once", async (req, res) => {
   try {
     const task = await orch.runToCompletion({ goal, mode: "diagnose", workspace });
     res.json({
-      output: { rootCause: task.verdict ? task.verdict.rootCause : null, confidence: task.verdict ? task.verdict.confidence : "inconclusive" },
+      output: {
+        rootCause: task.verdict ? task.verdict.rootCause : null,
+        confidence: task.verdict ? task.verdict.confidence : "inconclusive",
+        materialVersion: task.materialVersion ?? null,
+        evidenceRoot: task.evidenceRoot ?? null,
+      },
       usage: { cost_usd: task.spentUsd || 0, tokens: task.spentTokens || 0, latency_ms: Date.now() - started }
     });
   } catch (e) {
@@ -275,7 +280,8 @@ app.delete("/api/tasks/:id", (req, res) => {
 
 app.post("/api/tasks/:id/pick", (req, res) => {
   const candidateId = String((req.body && req.body.candidateId) || "");
-  orch.pickCandidate(req.params.id, candidateId);
+  const error = orch.pickCandidate(req.params.id, candidateId);
+  if (error) { res.status(409).json({ error }); return; }
   res.json({ ok: true });
 });
 
@@ -303,13 +309,19 @@ app.get("/api/tasks/:id/events", (req, res) => {
   });
 });
 
+app.post("/api/tasks/:id/stop", (req, res) => {
+  orch.stopTask(req.params.id);
+  res.json({ ok: true });
+});
+
 app.post("/api/tasks/:id/subtasks/:sid/stop", (req, res) => {
   orch.stopSubtask(req.params.id, req.params.sid);
   res.json({ ok: true });
 });
 
 app.post("/api/tasks/:id/subtasks/:sid/retry", (req, res) => {
-  orch.retrySubtask(req.params.id, req.params.sid);
+  const error = orch.retrySubtask(req.params.id, req.params.sid);
+  if (error) { res.status(409).json({ error }); return; }
   res.json({ ok: true });
 });
 

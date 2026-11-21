@@ -1,5 +1,14 @@
 import type { Task, TaskMode, TaskSummary } from "./types";
 
+async function errorMessage(r: Response, fallback: string): Promise<string> {
+  try {
+    const j = await r.json();
+    return String((j && j.error) || fallback);
+  } catch {
+    return fallback + " (" + r.status + ")";
+  }
+}
+
 export interface PublicSettings {
   engine: "mock" | "pi";
   provider: string;
@@ -36,11 +45,12 @@ export async function getTask(id: string): Promise<Task> {
 }
 
 export async function pickCandidate(taskId: string, candidateId: string): Promise<void> {
-  await fetch("/api/tasks/" + taskId + "/pick", {
+  const r = await fetch("/api/tasks/" + taskId + "/pick", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ candidateId })
   });
+  if (!r.ok) throw new Error(await errorMessage(r, "pick candidate failed"));
 }
 
 export async function stopSubtask(taskId: string, sid: string): Promise<void> {
@@ -48,7 +58,8 @@ export async function stopSubtask(taskId: string, sid: string): Promise<void> {
 }
 
 export async function retrySubtask(taskId: string, sid: string): Promise<void> {
-  await fetch("/api/tasks/" + taskId + "/subtasks/" + sid + "/retry", { method: "POST" });
+  const r = await fetch("/api/tasks/" + taskId + "/subtasks/" + sid + "/retry", { method: "POST" });
+  if (!r.ok) throw new Error(await errorMessage(r, "retry failed"));
 }
 
 export async function getSettings(): Promise<PublicSettings> {

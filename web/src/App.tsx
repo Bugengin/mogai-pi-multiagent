@@ -76,9 +76,16 @@ function AgentPane(props: {
               <li key={i}>
                 <span className="ev-type">{e.type}</span>
                 <span className="ev-loc">{e.locator}</span>
-                {e.valid === true && <span className="ev-ok">✓ 已校验</span>}
-                {e.valid === false && <span className="ev-bad">✗ 校验未通过</span>}
+                <span className={e.valid ? "ev-ok" : "ev-bad"}>{e.valid ? "✓ 有效" : "✗ 无效"}</span>
+                {e.fileExists === true && <span className="ev-ok">文件存在</span>}
+                {e.fileExists === false && <span className="ev-bad">文件不存在</span>}
+                {e.lineMatches === true && <span className="ev-ok">行号匹配</span>}
+                {e.lineMatches === false && <span className="ev-bad">行号不匹配</span>}
+                {e.snippetFound === true && <span className="ev-ok">片段找到</span>}
+                {e.snippetFound === false && <span className="ev-bad">片段未找到</span>}
                 {e.snippet && <span className="ev-snip">{e.snippet}</span>}
+                {e.supports && <span className="ev-support">支持：{e.supports}</span>}
+                {e.verifyReason && <span className="ev-reason">{e.verifyReason}</span>}
               </li>
             ))}
           </ul>
@@ -241,8 +248,14 @@ export default function App() {
   }
 
   async function onStop(sid: string) { if (task) await stopSubtask(task.id, sid); }
-  async function onRetry(sid: string) { if (task) await retrySubtask(task.id, sid); }
-  async function onPick(cid: string) { if (task) await pickCandidate(task.id, cid); }
+  async function onRetry(sid: string) {
+    if (!task) return;
+    try { await retrySubtask(task.id, sid); } catch (e) { alert(String((e as Error).message || e)); }
+  }
+  async function onPick(cid: string) {
+    if (!task) return;
+    try { await pickCandidate(task.id, cid); } catch (e) { alert(String((e as Error).message || e)); }
+  }
 
   useEffect(() => {
     refreshHistory();
@@ -366,6 +379,9 @@ export default function App() {
                     <span className="hist-meta">
                       {h.mode === "recon" ? <span className="mode-tag">巡检</span> : null} {STATUS_LABEL[h.status] || h.status}
                       {h.confidence ? " · 置信度" + CONF_LABEL[h.confidence] : ""}
+                      {h.engine ? " · " + (h.engine === "pi" ? "真实 Pi" : "Mock") + (h.modelId ? "/" + h.modelId : "") : ""}
+                      {h.workspace ? " · " + h.workspace : ""}
+                      {h.materialVersion ? " · 资料 " + h.materialVersion : ""}
                     </span>
                   </button>
                 ))}
@@ -387,6 +403,9 @@ export default function App() {
             {task.mode === "recon" ? "🧭 " : "🔎 "}
             {task.goal}
             {task.scope ? <span className="tag" style={{ marginLeft: 10 }}>范围：{task.scope}</span> : null}
+            {task.engine ? <span className="tag" style={{ marginLeft: 10 }}>引擎：{task.engine === "pi" ? "真实 Pi" : "Mock"}</span> : null}
+            {task.modelId ? <span className="tag" style={{ marginLeft: 10 }}>{task.modelId}</span> : null}
+            {task.materialVersion ? <span className="tag" style={{ marginLeft: 10 }}>资料 {task.materialVersion}</span> : null}
           </div>
           <div className="taskbar-right">
             {typeof task.spentUsd === "number" && task.spentUsd > 0 ? (

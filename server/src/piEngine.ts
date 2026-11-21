@@ -140,7 +140,7 @@ export async function runPiSubtask(
     "工作区目录（只读）：" + cwd,
     "要求：conclusion 必须与 summary 一致；summary 要直接给出你判断的实质根因；evidence 只引用你实际读到的、确实存在的文件和行号（不要编造）。",
     "请用 read / grep / find / ls 在本工作区里查证，然后只输出一个 JSON 对象（不要解释、不要 Markdown 代码块）：",
-    '{"conclusion":"confirmed|refuted|inconclusive","summary":"一句话结论","evidence":[{"type":"code|log|test","locator":"相对文件:行号 或 测试文件#用例","snippet":"关键片段","verify":"如何复核"}],"doubts":["未验证疑点"]}'
+    '{"conclusion":"confirmed|refuted|inconclusive","summary":"一句话结论","evidence":[{"type":"code|log|test","locator":"相对文件:行号 或 测试文件#用例","snippet":"关键片段","verify":"如何复核","supports":"这条证据支持哪条判断"}],"doubts":["未验证疑点"]}'
   ].join("\n");
 
   const { json, raw } = await askJson(session, prompt, 3, readText);
@@ -157,7 +157,8 @@ export async function runPiSubtask(
     type: e && (e.type === "log" || e.type === "test") ? e.type : "code",
     locator: String((e && e.locator) || ""),
     snippet: e && e.snippet ? String(e.snippet) : undefined,
-    verify: e && e.verify ? String(e.verify) : undefined
+    verify: e && e.verify ? String(e.verify) : undefined,
+    supports: e && e.supports ? String(e.supports) : undefined
   })).filter((e) => e.locator);
   const doubts: string[] = Array.isArray(json.doubts) ? json.doubts.map((d: unknown) => String(d)) : [];
   return { conclusion: coerceConclusion(json.conclusion), summary: String(json.summary || "(无结论摘要)"), evidence, doubts, cost };
@@ -207,6 +208,8 @@ export async function adjudicateWithPi(settings: EngineSettings, task: Task, cwd
   };
 }
 
+export const JUDGE_PROMPT_VERSION = "judge-v1";
+
 /** LLM 裁判：按 rubric 语义判分；解析失败重试，分歧分做二次复核。 */
 export async function judgeAnswer(
   settings: EngineSettings,
@@ -214,7 +217,7 @@ export async function judgeAnswer(
   rubric: string,
   actual: string,
   cwd: string
-): Promise<{ score: number; passed: boolean; reason: string }> {
+): Promise<{ score: number; passed: boolean; reason: string; judge: { provider: string; modelId: string; promptVersion: string } }> {
   const session = await makeSession(settings, cwd);
   let streamed = "";
   const unsub = session.subscribe((ev: any) => {
@@ -255,5 +258,14 @@ export async function judgeAnswer(
   try { unsub(); } catch { /* ignore */ }
   try { session.dispose(); } catch { /* ignore */ }
   if (!first.json) throw new Error("judge: 多次未返回可解析 JSON");
-  return { score, passed, reason };
+  return {
+    score,
+    passed,
+    reason,
+    judge: {
+      provider: settings.provider,
+      modelId: settings.modelId,
+      promptVersion: JUDGE_PROMPT_VERSION,
+    },
+  };
 }

@@ -8,7 +8,7 @@ import type { EngineSettings } from "./settings";
 import type { Store, TaskSummary } from "./store";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-type RunToken = { cancelled: boolean; abort?: () => void };
+type RunToken = { taskId: string; subId: string; attempt: number; cancelled: boolean; abort?: () => void };
 type Watch = { deadline: ReturnType<typeof setTimeout>; stuck: ReturnType<typeof setInterval> };
 
 export interface CreateTaskInput {
@@ -25,12 +25,49 @@ export class Orchestrator {
   private queues = new Map<string, Subtask[]>();
   private progressAt = new Map<string, number>();
   private watches = new Map<string, Watch>();
+  private taskSettings = new Map<string, EngineSettings>();
 
   constructor(
     private store: Store,
     private resolveWorkspace: (name?: string) => string,
     private getSettings: () => EngineSettings
   ) {}
+
+  private tokenKey(taskId: string, subId: string, attempt: number): string {
+    return taskId + ":" + subId + ":" + attempt;
+  }
+  private progressKey(taskId: string, subId: string, attempt: number): string {
+    return taskId + ":" + subId + ":" + attempt;
+  }
+  private settingsFor(task: Task): EngineSettings {
+    return this.taskSettings.get(task.id) || this.getSettings();
+  }
+  private ensureTaskSettings(task: Task): EngineSettings {
+    const existing = this.taskSettings.get(task.id);
+    if (existing) return existing;
+    const current = this.getSettings();
+    const mismatches: string[] = [];
+    if (task.engine && task.engine !== current.engine) mismatches.push("引擎 " + task.engine + " -> " + current.engine);
+    if (task.provider && task.provider !== current.provider) mismatches.push("供应商 " + task.provider + " -> " + current.provider);
+    if (task.modelId && task.modelId !== current.modelId) mismatches.push("模型 " + task.modelId + " -> " + current.modelId);
+    if (task.baseUrl && task.baseUrl !== current.baseUrl) mismatches.push("Base URL 已变化");
+    if (mismatches.length > 0) {
+      throw new Error("历史任务配置与当前设置不一致（" + mismatches.join("；") + "），请用当前配置新建任务，不要沿用旧任务重试");
+    }
+    if (current.engine === "pi" && (!current.apiKey || !current.modelId)) {
+      throw new Error("当前真实 Pi 配置不完整（缺少 API Key 或模型），无法重试历史任务");
+    }
+    this.taskSettings.set(task.id, { ...current });
+    return this.taskSettings.get(task.id)!;
+  }
+  private currentToken(task: Task, sub: Subtask): RunToken | undefined {
+    return this.tokens.get(this.tokenKey(task.id, sub.id, sub.attempt || 1));
+  }
+  private isCurrentAttempt(task: Task, sub: Subtask, token: RunToken): boolean {
+    return sub.status === "running"
+      && (sub.attempt || 1) === token.attempt
+      && this.tokens.get(this.tokenKey(task.id, sub.id, token.attempt)) === token;
+  }
 
   private fire(taskId: string, ev: ServerEvent): void {
     const em = this.emitters.get(taskId);
@@ -59,6 +96,14 @@ export class Orchestrator {
 
   deleteTask(id: string): void {
     this.stopWatch(id);
+    this.queues.delete(id);
+    this.taskSettings.delete(id);
+    for (const key of Array.from(this.tokens.keys())) {
+      if (key.startsWith(id + ":")) this.tokens.delete(key);
+    }
+    for (const key of Array.from(this.progressAt.keys())) {
+      if (key.startsWith(id + ":")) this.progressAt.delete(key);
+    }
     this.tasks.delete(id);
     this.emitters.delete(id);
     this.store.delete(id);
@@ -81,6 +126,10 @@ export class Orchestrator {
     const id = "task_" + randomUUID().slice(0, 8);
     const goal = (input.goal || "").trim() || "帮我看看这个范围里有没有问题";
     const mode = input.mode || "diagnose";
+    const settings = this.getSettings();
+    this.taskSettings.set(id, { ...settings });
+    const evidenceRoot = this.resolveWorkspace(input.workspace);
+    const materialMatch = /@(mver_[A-Za-z0-9]+)/.exec(evidenceRoot);
     const task: Task = {
       id,
       goal,
@@ -88,6 +137,12 @@ export class Orchestrator {
       scope: input.scope && input.scope.trim() ? input.scope.trim() : undefined,
       status: mode === "recon" ? "recon" : "running",
       workspace: input.workspace,
+      evidenceRoot,
+      materialVersion: materialMatch ? materialMatch[1] : undefined,
+      engine: settings.engine,
+      provider: settings.provider,
+      modelId: settings.modelId,
+      baseUrl: settings.baseUrl,
       subtasks: [],
       spentUsd: 0,
       spentTokens: 0,
@@ -129,7 +184,8 @@ export class Orchestrator {
       scope: p.scope,
       hypothesis: p.hypothesis,
       status: "pending" as const,
-      progress: []
+      progress: [],
+      attempt: 0
     }));
   }
 
@@ -140,11 +196,16 @@ export class Orchestrator {
     this.emitTask(task);
   }
 
-  pickCandidate(taskId: string, candidateId: string): void {
+  pickCandidate(taskId: string, candidateId: string): string | null {
     const task = this.tasks.get(taskId) || this.getTask(taskId);
-    if (!task || !task.candidates) return;
+    if (!task || !task.candidates) return "找不到任务或候选";
+    try {
+      this.ensureTaskSettings(task);
+    } catch (e) {
+      return String((e as Error).message || e);
+    }
     const cand = task.candidates.find((c) => c.id === candidateId);
-    if (!cand) return;
+    if (!cand) return "找不到候选";
     task.goal = cand.title;
     task.mode = "diagnose";
     task.candidates = undefined;
@@ -156,6 +217,7 @@ export class Orchestrator {
     this.emitTask(task);
     this.startWatch(task);
     this.enqueueAll(task);
+    return null;
   }
 
   private enqueueAll(task: Task): void {
@@ -164,8 +226,9 @@ export class Orchestrator {
   }
 
   private pump(task: Task): void {
+    if (task.status !== "running") return;
     const q = this.queues.get(task.id) || [];
-    const max = Math.max(1, this.getSettings().maxConcurrency || 4);
+    const max = Math.max(1, this.settingsFor(task).maxConcurrency || 4);
     let running = task.subtasks.filter((s) => s.status === "running").length;
     while (running < max && q.length > 0) {
       const sub = q.shift()!;
@@ -177,7 +240,7 @@ export class Orchestrator {
 
   private startWatch(task: Task): void {
     this.stopWatch(task.id);
-    const settings = this.getSettings();
+    const settings = this.settingsFor(task);
     const maxSec = Math.max(2, settings.maxTaskSeconds || 300);
     const stuckSec = Math.max(5, settings.stuckSeconds || 90);
     const deadline = setTimeout(() => {
@@ -188,11 +251,11 @@ export class Orchestrator {
       let changed = false;
       for (const sub of task.subtasks) {
         if (sub.status !== "running") continue;
-        const last = this.progressAt.get(sub.id) || sub.startedAt || now;
+        const last = this.progressAt.get(this.progressKey(task.id, sub.id, sub.attempt || 1)) || sub.startedAt || now;
         if (now - last > stuckSec * 1000) {
           sub.status = "stuck";
           sub.endedAt = now;
-          const tok = this.tokens.get(sub.id);
+          const tok = this.currentToken(task, sub);
           if (tok) {
             tok.cancelled = true;
             if (tok.abort) { try { tok.abort(); } catch { /* ignore */ } }
@@ -225,7 +288,7 @@ export class Orchestrator {
       if (sub.status === "running" || sub.status === "pending") {
         sub.status = "stopped";
         sub.endedAt = Date.now();
-        const tok = this.tokens.get(sub.id);
+        const tok = this.currentToken(task, sub);
         if (tok) {
           tok.cancelled = true;
           if (tok.abort) { try { tok.abort(); } catch { /* ignore */ } }
@@ -246,40 +309,56 @@ export class Orchestrator {
 
   private startSubtask(task: Task, sub: Subtask): void {
     if (sub.status === "running") return;
+    sub.attempt = (sub.attempt || 0) + 1;
     sub.status = "running";
     sub.progress = [];
     sub.result = undefined;
     sub.startedAt = Date.now();
     sub.endedAt = undefined;
-    const token: RunToken = { cancelled: false };
-    this.tokens.set(sub.id, token);
-    this.progressAt.set(sub.id, Date.now());
+    const token: RunToken = { taskId: task.id, subId: sub.id, attempt: sub.attempt, cancelled: false };
+    this.tokens.set(this.tokenKey(task.id, sub.id, token.attempt), token);
+    this.progressAt.set(this.progressKey(task.id, sub.id, token.attempt), Date.now());
     this.emitSub(task, sub);
     void this.runLoop(task, sub, token);
   }
 
-  private pushProgress(task: Task, sub: Subtask, msg: string): void {
+  private pushProgress(task: Task, sub: Subtask, msg: string, token?: RunToken): void {
+    if (token && !this.isCurrentAttempt(task, sub, token)) return;
     sub.progress.push(msg);
-    this.progressAt.set(sub.id, Date.now());
+    this.progressAt.set(this.progressKey(task.id, sub.id, sub.attempt || 1), Date.now());
     this.fire(task.id, { type: "log", taskId: task.id, subtaskId: sub.id, message: msg });
     this.emitSub(task, sub);
   }
 
   private verifyResult(res: SubtaskResult, root: string): void {
     const results = res.evidence.map((e) => verifyEvidence(e, root));
-    res.evidence = res.evidence.map((e, i) => ({ ...e, valid: results[i].valid }));
+    res.evidence = res.evidence.map((e, i) => ({
+      ...e,
+      valid: results[i].valid,
+      fileExists: results[i].fileExists,
+      lineMatches: results[i].lineMatches,
+      snippetFound: results[i].snippetFound,
+      verifyReason: results[i].reason,
+    }));
     const invalid = results.filter((r) => !r.valid);
     if (invalid.length > 0) {
       res.doubts.push("证据校验未通过：" + invalid.map((r) => r.reason).join("；"));
     }
+    if (res.evidence.length === 0) {
+      res.conclusion = "inconclusive";
+      res.summary = "（缺少可核验证据，结论降级为不确定）" + res.summary;
+      res.doubts.push("未提供可核验证据");
+      return;
+    }
     const validCount = results.filter((r) => r.valid).length;
-    if (res.evidence.length > 0 && validCount === 0) {
+    if (validCount === 0) {
       res.conclusion = "inconclusive";
       res.summary = "（证据校验未通过，结论降级为不确定）" + res.summary;
     }
   }
 
-  private finishSubtask(task: Task, sub: Subtask, res: SubtaskResult): void {
+  private finishSubtask(task: Task, sub: Subtask, res: SubtaskResult, token?: RunToken): void {
+    if (token && !this.isCurrentAttempt(task, sub, token)) return;
     this.verifyResult(res, this.resolveWorkspace(task.workspace));
     sub.result = res;
     sub.status = "done";
@@ -288,7 +367,7 @@ export class Orchestrator {
     task.spentTokens = (task.spentTokens || 0) + (res.cost ? res.cost.tokens : 0);
     this.emitSub(task, sub);
 
-    const cap = this.getSettings().maxCostUsd;
+    const cap = this.settingsFor(task).maxCostUsd;
     if (cap > 0 && (task.spentUsd || 0) > cap) {
       this.failTask(task, "超过费用上限（$" + cap + "），已中止");
       return;
@@ -297,41 +376,59 @@ export class Orchestrator {
     this.maybeAdjudicate(task);
   }
 
+  private failSubtask(task: Task, sub: Subtask, token: RunToken, reason: string, partial?: SubtaskResult): void {
+    if (!this.isCurrentAttempt(task, sub, token)) return;
+    const res: SubtaskResult = partial
+      ? { ...partial, doubts: [...(partial.doubts || [])] }
+      : { conclusion: "inconclusive", summary: "运行失败：" + reason, evidence: [], doubts: [], cost: { tokens: 0, usd: 0 } };
+    if (!res.doubts.includes(reason)) res.doubts.push(reason);
+    sub.result = res;
+    sub.status = "failed";
+    sub.endedAt = Date.now();
+    this.emitSub(task, sub);
+    this.pump(task);
+    this.maybeAdjudicate(task);
+  }
+
   private async runLoop(task: Task, sub: Subtask, token: RunToken): Promise<void> {
-    const settings = this.getSettings();
-    const usePi = settings.engine === "pi" && !!settings.apiKey && !!settings.modelId;
-    if (usePi) {
-      try {
-        const res = await runPiSubtask(
-          settings,
-          task,
-          sub,
-          this.resolveWorkspace(task.workspace),
-          (msg) => this.pushProgress(task, sub, msg),
-          (fn) => { token.abort = fn; }
-        );
-        if (token.cancelled) return;
-        this.finishSubtask(task, sub, res);
-        return;
-      } catch (e) {
-        await this.runMock(task, sub, token, "真实 pi 调用失败，已回退 mock：" + String(e).slice(0, 160));
-        return;
-      }
+    const settings = this.settingsFor(task);
+    // mock 只在用户明确选择演示模式时执行；engine=pi 的任何失败都不许回退 mock。
+    if (settings.engine !== "pi") {
+      await this.runMock(task, sub, token);
+      return;
     }
-    await this.runMock(task, sub, token);
+    if (!settings.apiKey || !settings.modelId) {
+      this.failSubtask(task, sub, token, "真实 Pi 引擎缺少 API Key 或模型设置，未执行");
+      return;
+    }
+    try {
+      const res = await runPiSubtask(
+        settings,
+        task,
+        sub,
+        this.resolveWorkspace(task.workspace),
+        (msg) => this.pushProgress(task, sub, msg, token),
+        (fn) => { token.abort = fn; }
+      );
+      if (!this.isCurrentAttempt(task, sub, token)) return;
+      this.finishSubtask(task, sub, res, token);
+    } catch (e) {
+      if (!this.isCurrentAttempt(task, sub, token)) return;
+      this.failSubtask(task, sub, token, "真实 Pi 调用失败：" + String(e).slice(0, 240));
+    }
   }
 
   private async runMock(task: Task, sub: Subtask, token: RunToken, note?: string): Promise<void> {
     const steps = stepsFor(task.goal, sub);
     for (const step of steps) {
       await sleep(step.delay);
-      if (token.cancelled) return;
-      this.pushProgress(task, sub, step.text);
+      if (!this.isCurrentAttempt(task, sub, token)) return;
+      this.pushProgress(task, sub, step.text, token);
     }
-    if (token.cancelled) return;
+    if (!this.isCurrentAttempt(task, sub, token)) return;
     const res = resultFor(task.goal, sub);
     if (note) res.doubts.push(note);
-    this.finishSubtask(task, sub, res);
+    this.finishSubtask(task, sub, res, token);
   }
 
   stopSubtask(taskId: string, subtaskId: string): void {
@@ -339,7 +436,7 @@ export class Orchestrator {
     if (!task) return;
     const sub = task.subtasks.find((s) => s.id === subtaskId);
     if (!sub) return;
-    const token = this.tokens.get(sub.id);
+    const token = this.currentToken(task, sub);
     if (token) {
       token.cancelled = true;
       if (token.abort) { try { token.abort(); } catch { /* ignore */ } }
@@ -353,12 +450,38 @@ export class Orchestrator {
     }
   }
 
-  retrySubtask(taskId: string, subtaskId: string): void {
-    const task = this.tasks.get(taskId);
+  stopTask(taskId: string): void {
+    const task = this.tasks.get(taskId) || this.getTask(taskId);
     if (!task) return;
+    this.stopWatch(task.id);
+    this.queues.set(task.id, []);
+    for (const sub of task.subtasks) {
+      if (sub.status === "running" || sub.status === "pending") {
+        const token = this.currentToken(task, sub);
+        if (token) {
+          token.cancelled = true;
+          if (token.abort) { try { token.abort(); } catch { /* ignore */ } }
+        }
+        sub.status = "stopped";
+        sub.endedAt = Date.now();
+        this.emitSub(task, sub);
+      }
+    }
+    task.status = "stopped";
+    this.emitTask(task);
+  }
+
+  retrySubtask(taskId: string, subtaskId: string): string | null {
+    const task = this.tasks.get(taskId) || this.getTask(taskId);
+    if (!task) return "找不到任务";
     const sub = task.subtasks.find((s) => s.id === subtaskId);
-    if (!sub) return;
-    if (sub.status === "running") return;
+    if (!sub) return "找不到子任务";
+    if (sub.status === "running") return null;
+    try {
+      this.ensureTaskSettings(task);
+    } catch (e) {
+      return String((e as Error).message || e);
+    }
     if (task.verdict) {
       task.verdict = undefined;
       task.status = "running";
@@ -366,6 +489,7 @@ export class Orchestrator {
       this.emitTask(task);
     }
     this.startSubtask(task, sub);
+    return null;
   }
 
   private maybeAdjudicate(task: Task): void {
@@ -373,15 +497,15 @@ export class Orchestrator {
     const terminal = task.subtasks.every(
       (s) => s.status === "done" || s.status === "failed" || s.status === "stopped" || s.status === "stuck"
     );
-    const anyDone = task.subtasks.some((s) => s.status === "done");
-    if (terminal && anyDone) void this.adjudicate(task);
+    if (terminal) void this.adjudicate(task);
   }
 
   private async adjudicate(task: Task): Promise<void> {
     task.status = "adjudicating";
     this.emitTask(task);
-    const settings = this.getSettings();
-    const usePi = settings.engine === "pi" && !!settings.apiKey && !!settings.modelId;
+    const settings = this.settingsFor(task);
+    const realRequested = settings.engine === "pi";
+    const usePi = realRequested && !!settings.apiKey && !!settings.modelId;
     let verdict: TaskVerdict | null = null;
     if (usePi) {
       try {
@@ -390,37 +514,60 @@ export class Orchestrator {
         verdict = null;
       }
     }
+    // 任务可能已被停止/超时/删除；迟到仲裁结果必须丢弃，不能把状态改回完成。
+    if (this.tasks.get(task.id) !== task || task.status !== "adjudicating") return;
     if (!verdict) {
-      await sleep(600);
-      verdict = this.makeVerdict(task);
-      if (usePi) verdict.unresolved = [...verdict.unresolved, "主 Pi 真实仲裁失败，已回退模板结论"];
+      if (realRequested) {
+        verdict = this.makeInconclusiveVerdict(
+          task,
+          usePi ? "主 Pi 真实仲裁失败，未采用模板结论" : "真实 Pi 引擎缺少 API Key 或模型，未进行真实仲裁"
+        );
+      } else {
+        await sleep(600);
+        if (this.tasks.get(task.id) !== task || task.status !== "adjudicating") return;
+        verdict = this.makeVerdict(task, true);
+      }
     }
+    const anyDone = task.subtasks.some((s) => s.status === "done" && s.result);
     task.verdict = verdict;
-    task.status = "done";
+    task.status = anyDone ? "done" : "failed";
     this.stopWatch(task.id);
     this.fire(task.id, { type: "verdict", taskId: task.id, verdict });
     this.emitTask(task);
   }
 
-  private makeVerdict(task: Task): TaskVerdict {
+  private makeInconclusiveVerdict(task: Task, reason: string): TaskVerdict {
+    const doubts = task.subtasks.flatMap((s) => (s.result ? s.result.doubts : []));
+    return {
+      rootCause: null,
+      confidence: "inconclusive",
+      reasoning: [reason, "已完成的子任务与证据保留，不做模板推断"],
+      unresolved: Array.from(new Set([...doubts, reason])),
+    };
+  }
+
+  private makeVerdict(task: Task, allowTemplate = false): TaskVerdict {
     const done = task.subtasks.filter((s) => s.status === "done" && s.result);
-    if (isExportScenario(task.goal)) {
+    if (allowTemplate && isExportScenario(task.goal)) {
       return {
         rootCause: "查询过滤条件 status='PENDING' 使查询返回 0 行；写入逻辑只是如实写出空表头，不是写入 bug。",
         confidence: "high",
         reasoning: [
-          "子任务A(查询)：结论=成立，证据=queryBuilder.ts:120 + 日志 rows=0（已校验）",
-          "子任务B(写入)：结论=排除，证据=writer.ts:42 空结果只写表头（已校验）",
+          "子任务A(查询)：结论=成立，证据=queryBuilder.ts:18 + 日志 rows=0（已校验）",
+          "子任务B(写入)：结论=排除，证据=writer.ts:8 空结果只写表头（已校验）",
           "两者冲突：A 指查询过滤，B 指写入层；但 B 缺少写入前行数日志，证据等级低于 A",
-          "判别性检查：同一导出 ID 下，在 writer.ts:42 前后各打一次 rows 计数日志并复跑",
+          "判别性检查：同一导出 ID 下，在 writer.ts:8 前后各打一次 rows 计数日志并复跑",
           "检查结果：写入前 rows 已为 0 -> 排除写入层，确认查询过滤为根因"
         ],
-        discriminatingCheck: "在 writer.ts:42 前后各打 rows 计数日志（同一导出 ID 复跑）",
+        discriminatingCheck: "在 writer.ts:8 前后各打 rows 计数日志（同一导出 ID 复跑）",
         unresolved: ["PENDING 状态是否本应有历史数据，需产品确认", "下游压缩步骤未纳入本次排查"]
       };
     }
     const conclusions = done.map((s) => s.result!.conclusion);
-    const allConfirmed = conclusions.length > 0 && conclusions.every((c) => c === "confirmed");
+    if (conclusions.length === 0) {
+      return this.makeInconclusiveVerdict(task, "没有子任务产出可核验结论，不硬给根因");
+    }
+    const allConfirmed = conclusions.every((c) => c === "confirmed");
     const hasInconclusive = conclusions.some((c) => c === "inconclusive");
     if (allConfirmed) {
       return {

@@ -13,7 +13,12 @@ export interface Evidence {
   locator: string;
   snippet?: string;
   verify?: string;
+  supports?: string;
   valid?: boolean;
+  fileExists?: boolean;
+  lineMatches?: boolean | null;
+  snippetFound?: boolean | null;
+  verifyReason?: string;
 }
 
 export interface SubtaskResult {
@@ -34,6 +39,7 @@ export interface Subtask {
   result?: SubtaskResult;
   startedAt?: number;
   endedAt?: number;
+  attempt?: number;
 }
 
 export interface Candidate {
@@ -59,6 +65,12 @@ export interface Task {
   mode: TaskMode;
   scope?: string;
   workspace?: string;
+  evidenceRoot?: string;
+  materialVersion?: string;
+  engine?: "mock" | "pi";
+  provider?: string;
+  modelId?: string;
+  baseUrl?: string;
   status:
     | "recon"
     | "awaiting_pick"

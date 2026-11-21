@@ -7,8 +7,20 @@ import { scoreCase } from "../src/evalService";
 const root = path.resolve(process.cwd(), "..", "demo-workspace");
 
 test("verify: valid code evidence passes", () => {
-  const r = verifyEvidence({ type: "code", locator: "queryBuilder.ts:120", snippet: 'where("status", "PENDING")' }, root);
+  const r = verifyEvidence({ type: "code", locator: "queryBuilder.ts:18", snippet: 'where("status", "PENDING")' }, root);
   assert.equal(r.valid, true);
+  assert.equal(r.fileExists, true);
+  assert.equal(r.lineMatches, true);
+  assert.equal(r.snippetFound, true);
+});
+
+test("verify: snippet elsewhere is invalid and reports line mismatch", () => {
+  const r = verifyEvidence({ type: "code", locator: "queryBuilder.ts:120", snippet: 'where("status", "PENDING")' }, root);
+  assert.equal(r.valid, false);
+  assert.equal(r.fileExists, true);
+  assert.equal(r.lineMatches, false);
+  assert.equal(r.snippetFound, true);
+  assert.match(r.reason, /行号不匹配/);
 });
 
 test("verify: missing file fails", () => {

@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/core.test.ts test/data.test.ts",
+    "test": "tsx --test test/core.test.ts test/data.test.ts test/orchestrator.test.ts",
     "reset-data": "node scripts/reset-data.mjs"
   },
   "dependencies": {

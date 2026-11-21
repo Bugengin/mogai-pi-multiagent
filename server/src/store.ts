@@ -10,6 +10,10 @@ export interface TaskSummary {
   status: string;
   createdAt: number;
   confidence?: string;
+  engine?: string;
+  modelId?: string;
+  workspace?: string;
+  materialVersion?: string;
 }
 
 export class Store {
@@ -20,8 +24,8 @@ export class Store {
     this.db = new DatabaseSync(dbPath);
     this.db.exec(
       "CREATE TABLE IF NOT EXISTS tasks (" +
-        "id TEXT PRIMARY KEY, goal TEXT NOT NULL, mode TEXT NOT NULL, scope TEXT, status TEXT NOT NULL, " +
-        "candidates_json TEXT, verdict_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL" +
+        "id TEXT PRIMARY KEY, goal TEXT NOT NULL, mode TEXT NOT NULL, scope TEXT, workspace TEXT, evidence_root TEXT, material_version TEXT, engine TEXT, provider TEXT, model_id TEXT, base_url TEXT, " +
+        "status TEXT NOT NULL, candidates_json TEXT, verdict_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL" +
       ");" +
       "CREATE TABLE IF NOT EXISTS subtasks (" +
         "task_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, scope TEXT NOT NULL, hypothesis TEXT NOT NULL, " +
@@ -29,15 +33,27 @@ export class Store {
         "PRIMARY KEY (task_id, id)" +
       ");"
     );
+    this.ensureTaskColumns();
+  }
+
+  private ensureTaskColumns(): void {
+    const cols = new Set(
+      (this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name)
+    );
+    for (const [name, type] of [["workspace", "TEXT"], ["evidence_root", "TEXT"], ["material_version", "TEXT"], ["engine", "TEXT"], ["provider", "TEXT"], ["model_id", "TEXT"], ["base_url", "TEXT"]] as const) {
+      if (!cols.has(name)) this.db.exec("ALTER TABLE tasks ADD COLUMN " + name + " " + type);
+    }
   }
 
   saveTask(task: Task): void {
     const now = Date.now();
     this.db
       .prepare(
-        "INSERT INTO tasks (id,goal,mode,scope,status,candidates_json,verdict_json,created_at,updated_at) " +
-          "VALUES (?,?,?,?,?,?,?,?,?) " +
+        "INSERT INTO tasks (id,goal,mode,scope,workspace,evidence_root,material_version,engine,provider,model_id,base_url,status,candidates_json,verdict_json,created_at,updated_at) " +
+          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
           "ON CONFLICT(id) DO UPDATE SET goal=excluded.goal, mode=excluded.mode, scope=excluded.scope, " +
+          "workspace=excluded.workspace, evidence_root=excluded.evidence_root, material_version=excluded.material_version, " +
+          "engine=excluded.engine, provider=excluded.provider, model_id=excluded.model_id, base_url=excluded.base_url, " +
           "status=excluded.status, candidates_json=excluded.candidates_json, verdict_json=excluded.verdict_json, updated_at=excluded.updated_at"
       )
       .run(
@@ -45,6 +61,13 @@ export class Store {
         task.goal,
         task.mode,
         task.scope ?? null,
+        task.workspace ?? null,
+        task.evidenceRoot ?? null,
+        task.materialVersion ?? null,
+        task.engine ?? null,
+        task.provider ?? null,
+        task.modelId ?? null,
+        task.baseUrl ?? null,
         task.status,
         task.candidates ? JSON.stringify(task.candidates) : null,
         task.verdict ? JSON.stringify(task.verdict) : null,
@@ -82,6 +105,13 @@ export class Store {
       goal: String(row.goal),
       mode: row.mode as Task["mode"],
       scope: row.scope == null ? undefined : String(row.scope),
+      workspace: row.workspace == null ? undefined : String(row.workspace),
+      evidenceRoot: row.evidence_root == null ? undefined : String(row.evidence_root),
+      materialVersion: row.material_version == null ? undefined : String(row.material_version),
+      engine: row.engine === "pi" || row.engine === "mock" ? row.engine : undefined,
+      provider: row.provider == null ? undefined : String(row.provider),
+      modelId: row.model_id == null ? undefined : String(row.model_id),
+      baseUrl: row.base_url == null ? undefined : String(row.base_url),
       status: row.status as Task["status"],
       subtasks: subs.map((s) => ({
         id: String(s.id),
@@ -103,7 +133,7 @@ export class Store {
 
   list(limit = 50): TaskSummary[] {
     const rows = this.db
-      .prepare("SELECT id,goal,mode,status,created_at,verdict_json FROM tasks ORDER BY created_at DESC LIMIT ?")
+      .prepare("SELECT id,goal,mode,status,created_at,verdict_json,engine,model_id,workspace,material_version FROM tasks ORDER BY created_at DESC LIMIT ?")
       .all(limit) as Record<string, unknown>[];
     return rows.map((r) => ({
       id: String(r.id),
@@ -111,7 +141,11 @@ export class Store {
       mode: String(r.mode),
       status: String(r.status),
       createdAt: Number(r.created_at),
-      confidence: r.verdict_json ? String((JSON.parse(String(r.verdict_json)) as { confidence?: string }).confidence) : undefined
+      confidence: r.verdict_json ? String((JSON.parse(String(r.verdict_json)) as { confidence?: string }).confidence) : undefined,
+      engine: r.engine == null ? undefined : String(r.engine),
+      modelId: r.model_id == null ? undefined : String(r.model_id),
+      workspace: r.workspace == null ? undefined : String(r.workspace),
+      materialVersion: r.material_version == null ? undefined : String(r.material_version)
     }));
   }
 

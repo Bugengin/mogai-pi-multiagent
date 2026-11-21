@@ -66,13 +66,13 @@ export function stepsFor(goal: string, sub: { id: string; scope: string }): { te
     if (sub.id === "s1") {
       return [
         { text: "读取导出入口 exportService.ts:88", delay: 700 },
-        { text: "追踪查询构造 queryBuilder.ts:120 -> WHERE status='PENDING'", delay: 900 },
+        { text: "追踪查询构造 queryBuilder.ts:18 -> WHERE status='PENDING'", delay: 900 },
         { text: "检索运行日志 logs/export-2026-11-19.log:88 -> rows=0", delay: 900 },
         { text: "确认 0 行发生在写文件之前", delay: 700 }
       ];
     }
     return [
-      { text: "读取写文件逻辑 writer.ts:42", delay: 800 },
+      { text: "读取写文件逻辑 writer.ts:8", delay: 800 },
       { text: "检查空结果分支（只写表头）", delay: 800 },
       { text: "检查文件路径与权限正常", delay: 700 },
       { text: "尝试取写入阶段行数日志：未取到（证据偏弱）", delay: 800 }
@@ -108,8 +108,8 @@ export function resultFor(goal: string, sub: { id: string; scope: string }): Sub
         conclusion: "confirmed" as Conclusion,
         summary: "查询过滤条件 status='PENDING' 导致 0 行；0 行在写文件之前已经发生。",
         evidence: [
-          { type: "code", locator: "queryBuilder.ts:120", snippet: 'where("status", "PENDING")', verify: "去掉该 where 条件后复跑查询" },
-          { type: "log", locator: "logs/export-2026-11-19.log:88", snippet: "rows=0", verify: "按导出 ID 过滤日志" }
+          { type: "code", locator: "queryBuilder.ts:18", snippet: 'where("status", "PENDING")', verify: "去掉该 where 条件后复跑查询", supports: "查询过滤条件导致 0 行" },
+          { type: "log", locator: "logs/export-2026-11-19.log:88", snippet: "rows=0", verify: "按导出 ID 过滤日志", supports: "0 行发生在写文件之前" }
         ],
         doubts: ["PENDING 状态本应有多少历史数据，未确认"],
         cost: { tokens: 8200, usd: 0.06 }
@@ -119,8 +119,8 @@ export function resultFor(goal: string, sub: { id: string; scope: string }): Sub
       conclusion: "refuted" as Conclusion,
       summary: "写入层正常：0 行时按设计只写表头，未发现写入丢数据。",
       evidence: [
-        { type: "code", locator: "writer.ts:42", snippet: "if (rows.length === 0) return writeHeaderOnly()", verify: "单测 writer.spec.ts#empty" },
-        { type: "test", locator: "writer.spec.ts#empty", snippet: "PASS", verify: "npm test -- writer" }
+        { type: "code", locator: "writer.ts:8", snippet: "if (rows.length === 0) return writeHeaderOnly()", verify: "单测 writer.spec.ts#empty", supports: "写入层按设计只写表头" },
+        { type: "test", locator: "writer.spec.ts#empty", snippet: "PASS", verify: "npm test -- writer", supports: "空结果不写数据行" }
       ],
       doubts: ["缺少写入前后行数日志，无法定位丢失点", "下游压缩步骤未验证"],
       cost: { tokens: 6900, usd: 0.05 }
