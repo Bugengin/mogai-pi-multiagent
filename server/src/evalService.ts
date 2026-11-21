@@ -26,6 +26,7 @@ export interface EvalCaseResult {
   method: "llm" | "keyword";
   judgeReason?: string;
   materialVersion?: string;
+  workspaceFingerprint?: string;
   usd: number;
   ms: number;
 }
@@ -155,6 +156,7 @@ export class EvalService {
         method,
         judgeReason,
         materialVersion: task.materialVersion,
+        workspaceFingerprint: task.workspaceFingerprint,
         usd: task.spentUsd || 0,
         ms
       });
@@ -197,7 +199,12 @@ export function toEvalplatReport(run: EvalRun, subjectName: string): unknown {
     score: r.score,
     scores: [{ operator: "root_cause_keywords", score: r.score, passed: r.passed, detail: { matched: r.matched, missed: r.missed } }],
     subject: {
-      output: { rootCause: r.actual, confidence: r.confidence, materialVersion: r.materialVersion || null },
+      output: {
+        rootCause: r.actual,
+        confidence: r.confidence,
+        materialVersion: r.materialVersion || null,
+        workspaceFingerprint: r.workspaceFingerprint || null,
+      },
       error: null,
       latency_ms: r.ms,
       cost_usd: r.usd,

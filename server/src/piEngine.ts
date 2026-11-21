@@ -236,28 +236,39 @@ export async function judgeAnswer(
     '只输出 JSON：{"score":0到1,"passed":true或false,"reason":"简要评语"}'
   ].join("\n");
 
+  const parseJudge = (json: any): { score: number; passed: boolean; reason: string } => {
+    if (!json || typeof json !== "object") throw new Error("裁判返回不是 JSON 对象");
+    if (typeof json.score !== "number" || !Number.isFinite(json.score)) {
+      throw new Error("裁判返回 score 缺失或类型错误");
+    }
+    if (json.score < 0 || json.score > 1) throw new Error("裁判返回 score 越界: " + json.score);
+    if (typeof json.passed !== "boolean") throw new Error("裁判返回 passed 缺失或类型错误");
+    return { score: clamp01(json.score), passed: json.passed, reason: String(json.reason || "") };
+  };
+
   const first = await askJson(session, prompt, 3, readText);
   let score = 0, passed = false, reason = "";
-  if (first.json) {
-    score = isFinite(Number(first.json.score)) ? clamp01(Number(first.json.score)) : (first.json.passed ? 1 : 0);
-    passed = !!first.json.passed;
-    reason = String(first.json.reason || "");
+  if (!first.json) {
+    try { unsub(); } catch { /* ignore */ }
+    try { session.dispose(); } catch { /* ignore */ }
+    throw new Error("judge: 多次未返回可解析 JSON");
   }
-  // 模棱两可（0.35~0.65）时做二次复核取平均
-  if (first.json && score >= 0.35 && score <= 0.65) {
-    try {
-      const second = await askJson(session, prompt, 2, readText);
-      if (second.json) {
-        const s2 = isFinite(Number(second.json.score)) ? clamp01(Number(second.json.score)) : (second.json.passed ? 1 : 0);
-        score = clamp01((score + s2) / 2);
-        passed = score >= 0.5 && (passed || !!second.json.passed);
-        reason = reason + " ｜ 复核:" + String(second.json.reason || "");
-      }
-    } catch { /* ignore */ }
+  const parsedFirst = parseJudge(first.json);
+  score = parsedFirst.score;
+  passed = parsedFirst.passed;
+  reason = parsedFirst.reason;
+
+  // 模棱两可（0.35~0.65）时做二次复核取平均；复核返回无效也必须是评分错误。
+  if (score >= 0.35 && score <= 0.65) {
+    const second = await askJson(session, prompt, 2, readText);
+    if (!second.json) throw new Error("judge: 复核多次未返回可解析 JSON");
+    const parsedSecond = parseJudge(second.json);
+    score = clamp01((score + parsedSecond.score) / 2);
+    passed = score >= 0.5 && (passed || parsedSecond.passed);
+    reason = reason + " ｜ 复核:" + parsedSecond.reason;
   }
   try { unsub(); } catch { /* ignore */ }
   try { session.dispose(); } catch { /* ignore */ }
-  if (!first.json) throw new Error("judge: 多次未返回可解析 JSON");
   return {
     score,
     passed,

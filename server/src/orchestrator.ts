@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { Task, Subtask, TaskVerdict, ServerEvent, SubtaskResult } from "./types";
 import { planSubtasks, stepsFor, resultFor, isExportScenario, candidatesFor } from "./engine";
 import { verifyEvidence } from "./verify";
@@ -8,6 +10,32 @@ import type { EngineSettings } from "./settings";
 import type { Store, TaskSummary } from "./store";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** 与数据中台 manifest 同口径的目录快照指纹：相对路径 + sha256 + size 排序后哈希。 */
+function treeFingerprint(root: string): string {
+  try {
+    const lines: string[] = [];
+    const walk = (dir: string): void => {
+      for (const name of fs.readdirSync(dir).sort()) {
+        const full = path.join(dir, name);
+        const stat = fs.statSync(full);
+        if (stat.isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!stat.isFile()) continue;
+        const rel = path.relative(root, full).split(path.sep).join("/");
+        const hash = createHash("sha256").update(fs.readFileSync(full)).digest("hex");
+        lines.push(rel + "\0" + hash + "\0" + stat.size);
+      }
+    };
+    walk(root);
+    lines.sort();
+    return createHash("sha256").update(lines.join("\n") + "\n").digest("hex");
+  } catch {
+    return "";
+  }
+}
 type RunToken = { taskId: string; subId: string; attempt: number; cancelled: boolean; abort?: () => void };
 type Watch = { deadline: ReturnType<typeof setTimeout>; stuck: ReturnType<typeof setInterval> };
 
@@ -50,7 +78,15 @@ export class Orchestrator {
     if (task.engine && task.engine !== current.engine) mismatches.push("引擎 " + task.engine + " -> " + current.engine);
     if (task.provider && task.provider !== current.provider) mismatches.push("供应商 " + task.provider + " -> " + current.provider);
     if (task.modelId && task.modelId !== current.modelId) mismatches.push("模型 " + task.modelId + " -> " + current.modelId);
-    if (task.baseUrl && task.baseUrl !== current.baseUrl) mismatches.push("Base URL 已变化");
+    if ((task.baseUrl || "") !== (current.baseUrl || "")) mismatches.push("Base URL 已变化");
+    const currentRoot = this.resolveWorkspace(task.workspace);
+    if (task.evidenceRoot && currentRoot !== task.evidenceRoot) mismatches.push("工作区/资料快照路径已变化");
+    if (task.workspaceFingerprint) {
+      const currentFingerprint = treeFingerprint(currentRoot);
+      if (!currentFingerprint || currentFingerprint !== task.workspaceFingerprint) {
+        mismatches.push("工作区/资料快照内容已变化");
+      }
+    }
     if (mismatches.length > 0) {
       throw new Error("历史任务配置与当前设置不一致（" + mismatches.join("；") + "），请用当前配置新建任务，不要沿用旧任务重试");
     }
@@ -116,6 +152,12 @@ export class Orchestrator {
     if (!loaded) return undefined;
     if (loaded.status === "planning" || loaded.status === "running" || loaded.status === "recon" || loaded.status === "adjudicating") {
       loaded.status = "stopped";
+      for (const sub of loaded.subtasks) {
+        if (sub.status === "running") {
+          sub.status = "stopped";
+          sub.endedAt = Date.now();
+        }
+      }
     }
     this.tasks.set(id, loaded);
     this.emitters.set(id, new EventEmitter());
@@ -139,6 +181,7 @@ export class Orchestrator {
       workspace: input.workspace,
       evidenceRoot,
       materialVersion: materialMatch ? materialMatch[1] : undefined,
+      workspaceFingerprint: treeFingerprint(evidenceRoot),
       engine: settings.engine,
       provider: settings.provider,
       modelId: settings.modelId,
@@ -191,6 +234,7 @@ export class Orchestrator {
 
   private async runRecon(task: Task): Promise<void> {
     await sleep(1400);
+    if (this.tasks.get(task.id) !== task || task.status !== "recon") return;
     task.candidates = candidatesFor(task.goal, task.scope);
     task.status = "awaiting_pick";
     this.emitTask(task);
@@ -199,6 +243,7 @@ export class Orchestrator {
   pickCandidate(taskId: string, candidateId: string): string | null {
     const task = this.tasks.get(taskId) || this.getTask(taskId);
     if (!task || !task.candidates) return "找不到任务或候选";
+    if (task.status === "stopped") return "任务已停止，请新建任务";
     try {
       this.ensureTaskSettings(task);
     } catch (e) {
@@ -482,7 +527,7 @@ export class Orchestrator {
     } catch (e) {
       return String((e as Error).message || e);
     }
-    if (task.verdict) {
+    if (task.status !== "running") {
       task.verdict = undefined;
       task.status = "running";
       this.startWatch(task);
