@@ -39,7 +39,7 @@
 - 每条用例的逐次结果保存在报告 `results[].attempts`，并记录 `repeat_count / pass_count / representative_index`；代表答案取最高分那一次。
 - 指标与报告 meta 的 token/成本按「每一次尝试」累计，不遗漏重复尝试。
 - 新增 `scripts/summarize_repeats.py` 输出逐条稳定性表。
-- 测试：evalplat `213 passed`（含 repeats、逐次重判、重复口径可比性回归用例；后续补齐缺失/显式字段区分与混合口径校验）。
+- 测试：evalplat 全量测试通过（含 repeats、逐次重判、重复口径可比性、key_points 反例/正例回归用例）。
 
 ## 复现
 
