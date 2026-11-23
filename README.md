@@ -50,12 +50,13 @@ npm --prefix server run start       # http://127.0.0.1:8787
 
 - `server/`：Node + TypeScript + Express + `node:sqlite`（任务/资料/设置持久化）。
 - `web/`：React + Vite + TypeScript（协作台 / 数据 / 评测 三个页签）。
-- 引擎：`@earendil-works/pi-coding-agent`；设置存 `server/.data/settings.json`（本地明文）。
+- 引擎：`@earendil-works/pi-coding-agent`；设置存 `server/.data/settings.json`（只存非密钥项）；API Key 单独存 `server/.data/credentials.json`（0600）或走环境变量 `PI_API_KEY`。
 - 示例工程：`demo-workspace`(export) / `demo-api`(api500) / `demo-report`(report)，供评测排查用。
 
 ## 说明与限制
 
-- 单用户、本地运行；不含权限系统；API Key 本机明文保存，勿提交到 git。
+- 单用户、本地运行；不含权限系统；API Key 不进配置文件（`credentials.json` / `PI_API_KEY`），`server/.data` 已忽略；默认只绑定 127.0.0.1。
+- 项目定位：个人本地、单用户、非公网工作台；登录/权限/多租户、生产数据库、公网部署、高可用中转、Secret Manager、运维监控等生产化项不在范围内（见 [docs/SCOPE-FINAL.md](docs/SCOPE-FINAL.md)）。
 - 真实引擎依赖可达的模型端点/中转；本机 openai/google 官方端点可能不可达，可在设置里配 Base URL 中转。
 - 评测裁判是模型，存在波动与额外成本；已加重试/二次复核，连续运行表现稳定。
 

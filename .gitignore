@@ -7,3 +7,7 @@ server/.data/
 !demo-workspace/logs/*.log
 !demo-api/logs/*.log
 !demo-report/logs/*.log
+
+# 本地数据快照，不入库
+docs/baseline/
+docs/stability-r004.json
