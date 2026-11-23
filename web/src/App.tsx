@@ -7,7 +7,11 @@ import type { Task, Subtask, ServerEvent, TaskMode, TaskSummary } from "./types"
 
 const STATUS_LABEL: Record<string, string> = {
   pending: "待办", running: "排查中", stuck: "卡住", done: "已完成", failed: "失败", stopped: "已停止",
-  recon: "侦察中", awaiting_pick: "待选择", adjudicating: "仲裁中", planning: "规划中"
+  recon: "侦察中", awaiting_pick: "待选择", adjudicating: "仲裁中", planning: "规划中",
+  preflight: "预检中转", retrying: "重试中", timeout: "已超时", inconclusive: "结论不确定"
+};
+const RUNMODE_LABEL: Record<string, string> = {
+  real: "真实模型", mock: "演示 Mock", degraded: "降级（未跑真实模型）", historical: "历史回放"
 };
 const CONCLUSION_LABEL: Record<string, string> = {
   confirmed: "成立", refuted: "排除", inconclusive: "证据不足"
@@ -37,7 +41,7 @@ const EXAMPLES = [
 ];
 
 function isTerminal(s: string): boolean {
-  return s === "done" || s === "stopped" || s === "failed";
+  return s === "done" || s === "stopped" || s === "failed" || s === "timeout" || s === "inconclusive";
 }
 
 function AgentPane(props: {
@@ -403,6 +407,7 @@ export default function App() {
             {task.goal}
             {task.scope ? <span className="tag" style={{ marginLeft: 10 }}>范围：{task.scope}</span> : null}
             {task.engine ? <span className="tag" style={{ marginLeft: 10 }}>引擎：{task.engine === "pi" ? "真实 Pi" : "Mock"}</span> : null}
+            {task.runMode ? <span className="tag" style={{ marginLeft: 10 }}>模式：{RUNMODE_LABEL[task.runMode] || task.runMode}</span> : null}
             {task.modelId ? <span className="tag" style={{ marginLeft: 10 }}>{task.modelId}</span> : null}
             {task.materialVersion ? <span className="tag" style={{ marginLeft: 10 }}>资料 {task.materialVersion}</span> : null}
           </div>
@@ -413,6 +418,15 @@ export default function App() {
             <span className={"pill " + task.status}>{STATUS_LABEL[task.status] || task.status}</span>
           </div>
         </div>
+
+        {task.failureReason && (task.status === "failed" || task.status === "timeout") ? (
+          <div className="card" style={{ borderColor: "#c0392b", background: "#fff5f5", marginBottom: 12 }}>
+            <div style={{ fontWeight: 600, color: "#c0392b", marginBottom: 4 }}>
+              {task.status === "timeout" ? "任务已超时终止" : "任务失败"}（阶段：{task.failureStage || "runtime"}）
+            </div>
+            <div style={{ fontSize: 13, lineHeight: 1.6 }}>{task.failureReason}</div>
+          </div>
+        ) : null}
 
         {isRecon ? (
           <ReconView task={task} onPick={onPick} />

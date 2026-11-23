@@ -7,9 +7,13 @@ import { Orchestrator } from "./orchestrator";
 import { Store } from "./store";
 import { DataStore } from "./dataStore";
 import { SettingsStore, KNOWN_PROVIDERS } from "./settings";
-import { testConnection, judgeAnswer } from "./piEngine";
+import { testConnection, judgeAnswer, JUDGE_PROMPT_VERSION } from "./piEngine";
 import { discoverModels } from "./modelDiscovery";
+import { checkRelayHealth, buildHealthPayload } from "./relayHealth";
+import { DatabaseSync } from "node:sqlite";
 import { EvalService, toEvalplatReport, toEvalplatDataset } from "./evalService";
+import { readAuthority, readAuthorityMaterials, readAuthorityMaterial, readAuthorityCases, readAuthorityReleases, readAuthorityDataset, findEvalplatDb } from "./authority";
+import { computeStability, renderStabilityMarkdown } from "./stability";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -33,9 +37,112 @@ const orch = new Orchestrator(store, resolveWorkspace, () => settingsStore.load(
 const evalService = new EvalService(dataDir);
 const dataStore = new DataStore(path.join(dataDir, "pi.db"));
 
-app.get("/api/health", (_req, res) => {
+function derivedMode(s: { engine: "mock" | "pi" }): "mock" | "real" {
+  return s.engine === "pi" ? "real" : "mock";
+}
+
+const RELAY_CACHE_TTL_MS = 15000;
+let relayHealthCache: { at: number; health: Awaited<ReturnType<typeof checkRelayHealth>> } | null = null;
+
+/** 数据库可用性：能只读打开并执行一次查询才算健康。 */
+function checkDatabaseHealth(): { ok: boolean; error?: string } {
+  const p = path.join(dataDir, "pi.db");
+  try {
+    const db = new DatabaseSync(p, { readOnly: true });
+    try {
+      db.prepare("SELECT 1").get();
+    } finally {
+      db.close();
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 160) };
+  }
+}
+
+type RelayForHealth = {
+  required: boolean;
+  ok: boolean;
+  stage: string;
+  message: string;
+  latencyMs: number;
+  cached: boolean;
+  checkedAt?: number;
+  ageMs?: number;
+};
+
+/**
+ * 供 /api/health 使用的缓存探测：
+ *  - mock 模式不要求中转，直接 ok；
+ *  - 真实模式优先用 15s 缓存，避免每次健康检查都阻塞在慢探测上；
+ *  - 缓存失效时才真探，且把总超时压到 8s，避免 UI 打开被拖死。
+ */
+async function relayStatusForHealth(force: boolean): Promise<RelayForHealth> {
+  const s = settingsStore.load();
+  if (s.engine !== "pi") {
+    return { required: false, ok: true, stage: "ok", message: "mock 模式不要求中转", latencyMs: 0, cached: false };
+  }
+  if (!force && relayHealthCache && Date.now() - relayHealthCache.at < RELAY_CACHE_TTL_MS) {
+    const h = relayHealthCache.health;
+    return {
+      required: true,
+      ok: h.ok,
+      stage: h.stage,
+      message: h.message,
+      latencyMs: h.latencyMs,
+      cached: true,
+      checkedAt: h.checkedAt,
+      ageMs: Date.now() - relayHealthCache.at
+    };
+  }
+  const h = await checkRelayHealth({
+    baseUrl: s.baseUrl,
+    provider: s.provider,
+    apiKey: s.apiKey,
+    connectTimeoutMs: s.connectTimeoutMs,
+    readTimeoutMs: s.readTimeoutMs,
+    totalTimeoutMs: Math.min(s.requestTimeoutMs || 8000, 8000)
+  });
+  relayHealthCache = { at: Date.now(), health: h };
+  return {
+    required: true,
+    ok: h.ok,
+    stage: h.stage,
+    message: h.message,
+    latencyMs: h.latencyMs,
+    cached: false,
+    checkedAt: h.checkedAt
+  };
+}
+
+// 整体健康：服务 + 数据库 + 中转依赖。服务/数据库异常 503；仅中转异常为 degraded(200)。
+app.get("/api/health", async (_req, res) => {
   const s = settingsStore.publicSettings();
-  res.json({ ok: true, engine: s.engine, db: "sqlite", ts: Date.now() });
+  const database = checkDatabaseHealth();
+  let relay: RelayForHealth;
+  try {
+    relay = await relayStatusForHealth(false);
+  } catch (e) {
+    relay = { required: s.engine === "pi", ok: false, stage: "config", message: "健康探测异常：" + String(e).slice(0, 120), latencyMs: 0, cached: false };
+  }
+  const payload = buildHealthPayload({ engine: s.engine, database, relay });
+  res.status(payload.httpStatus).json(payload.body);
+});
+
+// 中转实时探测：带连接/读取/总超时，明确返回 stage 与 message，供设置页/手动刷新使用。
+app.get("/api/health/relay", async (req, res) => {
+  const s = settingsStore.load();
+  const timeoutOverride = req.query.totalTimeoutMs ? Number(req.query.totalTimeoutMs) : undefined;
+  const health = await checkRelayHealth({
+    baseUrl: s.baseUrl,
+    provider: s.provider,
+    apiKey: s.apiKey,
+    connectTimeoutMs: s.connectTimeoutMs,
+    readTimeoutMs: s.readTimeoutMs,
+    totalTimeoutMs: Number.isFinite(timeoutOverride) && timeoutOverride ? timeoutOverride : s.requestTimeoutMs
+  });
+  relayHealthCache = { at: Date.now(), health };
+  res.json({ mode: derivedMode(s), engine: s.engine, required: s.engine === "pi", ...health });
 });
 
 /* ---------- settings ---------- */
@@ -55,6 +162,10 @@ app.put("/api/settings", (req, res) => {
   if (typeof b.maxCostUsd === "number") patch.maxCostUsd = b.maxCostUsd;
   if (typeof b.maxConcurrency === "number") patch.maxConcurrency = b.maxConcurrency;
   if (typeof b.stuckSeconds === "number") patch.stuckSeconds = b.stuckSeconds;
+  if (typeof b.relayPreflight === "boolean") patch.relayPreflight = b.relayPreflight;
+  if (typeof b.connectTimeoutMs === "number") patch.connectTimeoutMs = b.connectTimeoutMs;
+  if (typeof b.readTimeoutMs === "number") patch.readTimeoutMs = b.readTimeoutMs;
+  if (typeof b.requestTimeoutMs === "number") patch.requestTimeoutMs = b.requestTimeoutMs;
   settingsStore.save(patch as never);
   res.json({ ...settingsStore.publicSettings(), providers: KNOWN_PROVIDERS });
 });
@@ -86,6 +197,26 @@ app.post("/api/settings/test", async (req, res) => {
   res.json(result);
 });
 
+
+/* ---------- authority (只读数据中台，作为权威结果来源) ---------- */
+app.get("/api/authority/summary", (_req, res) => {
+  res.json(readAuthority());
+});
+app.get("/api/authority/materials", (_req, res) => {
+  res.json(readAuthorityMaterials());
+});
+app.get("/api/authority/materials/:id", (req, res) => {
+  res.json(readAuthorityMaterial(req.params.id));
+});
+app.get("/api/authority/cases", (_req, res) => {
+  res.json(readAuthorityCases());
+});
+app.get("/api/authority/releases", (_req, res) => {
+  res.json(readAuthorityReleases());
+});
+app.get("/api/authority/datasets/:id", (req, res) => {
+  res.json(readAuthorityDataset(req.params.id));
+});
 
 /* ---------- data (数据中台 · 资料版本库) ---------- */
 app.get("/api/data/documents", (_req, res) => {
@@ -178,7 +309,22 @@ app.post("/api/eval/run", async (req, res) => {
           } catch { return null; }
         }
       : undefined;
-    const run = await evalService.run(dataset, orch, judge);
+    const repeats = Number.isFinite(Number(b.repeats)) && Number(b.repeats) > 0 ? Number(b.repeats) : 1;
+    const aggRaw = String(b.aggregation || "majority");
+    const aggregation = aggRaw === "average" || aggRaw === "all" || aggRaw === "majority" ? aggRaw : "majority";
+    const run = await evalService.run(dataset, orch, judge, {
+      repeats,
+      aggregation,
+      meta: {
+        engine: st.engine,
+        provider: st.provider,
+        modelId: st.modelId,
+        judgeModelId: st.engine === "pi" ? st.modelId : undefined,
+        temperature: typeof b.temperature === "number" ? b.temperature : undefined,
+        promptVersions: { judge: JUDGE_PROMPT_VERSION },
+        notes: b.notes ? String(b.notes) : undefined
+      }
+    });
     res.json(run);
   } catch (e) {
     res.status(500).json({ error: String(e).slice(0, 300) });
@@ -243,6 +389,29 @@ app.get("/api/eval/runs/:id", (req, res) => {
   const r = evalService.getRun(req.params.id);
   if (!r) { res.status(404).json({ error: "not found" }); return; }
   res.json(r);
+});
+
+// 真实引擎多轮稳定性看板（只读评测中台 evalplat.db）
+app.get("/api/eval/stability", (req, res) => {
+  const dbPath = req.query.db ? String(req.query.db) : findEvalplatDb();
+  try {
+    res.json(computeStability({
+      dbPath,
+      subject: req.query.subject ? String(req.query.subject) : undefined,
+      version: req.query.version ? String(req.query.version) : undefined
+    }));
+  } catch (e) {
+    res.status(500).json({ available: false, reason: String(e).slice(0, 200) });
+  }
+});
+app.get("/api/eval/stability.md", (req, res) => {
+  const dbPath = req.query.db ? String(req.query.db) : findEvalplatDb();
+  try {
+    const r = computeStability({ dbPath, subject: req.query.subject ? String(req.query.subject) : undefined, version: req.query.version ? String(req.query.version) : undefined });
+    res.type("text/plain; charset=utf-8").send(renderStabilityMarkdown(r));
+  } catch (e) {
+    res.status(500).type("text/plain").send("stability error: " + String(e).slice(0, 200));
+  }
 });
 
 /* ---------- tasks ---------- */
@@ -333,6 +502,15 @@ if (fs.existsSync(dist)) {
 }
 
 const PORT = Number(process.env.PORT || 8787);
-app.listen(PORT, "127.0.0.1", () => {
-  console.log("pi product server running at http://127.0.0.1:" + PORT);
+const HOST = process.env.PI_HOST || "127.0.0.1";
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+if (!LOCAL_HOSTS.has(HOST) && process.env.PI_ALLOW_PUBLIC !== "1") {
+  console.error(
+    "拒绝绑定到非本机地址 " + HOST + "：本服务单用户、无鉴权，直接暴露到网络有风险。" +
+      "如确有需要，请设置 PI_ALLOW_PUBLIC=1，并在前面加鉴权/反向代理。"
+  );
+  process.exit(1);
+}
+app.listen(PORT, HOST, () => {
+  console.log("pi product server running at http://" + HOST + ":" + PORT + "（仅本机绑定，无内置鉴权）");
 });

@@ -2,10 +2,12 @@ import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { Task, Subtask, TaskVerdict, ServerEvent, SubtaskResult } from "./types";
+import type { Task, Subtask, TaskVerdict, ServerEvent, SubtaskResult, TerminalReason } from "./types";
 import { planSubtasks, stepsFor, resultFor, isExportScenario, candidatesFor } from "./engine";
 import { verifyEvidence } from "./verify";
 import { runPiSubtask, adjudicateWithPi } from "./piEngine";
+import { checkRelayHealth } from "./relayHealth";
+import { classifyInput } from "./inputGuard";
 import type { EngineSettings } from "./settings";
 import type { Store, TaskSummary } from "./store";
 
@@ -154,8 +156,9 @@ export class Orchestrator {
     if (cached) return cached;
     const loaded = this.store.loadTask(id);
     if (!loaded) return undefined;
-    if (loaded.status === "planning" || loaded.status === "running" || loaded.status === "recon" || loaded.status === "adjudicating") {
+    if (loaded.status === "planning" || loaded.status === "running" || loaded.status === "recon" || loaded.status === "adjudicating" || loaded.status === "preflight" || loaded.status === "retrying") {
       loaded.status = "stopped";
+      loaded.terminalReason = "user_stopped";
       for (const sub of loaded.subtasks) {
         if (sub.status === "running") {
           sub.status = "stopped";
@@ -202,22 +205,117 @@ export class Orchestrator {
 
     if (mode === "recon") {
       void this.runRecon(task);
-    } else {
+    } else if (!this.applyGuard(task)) {
       this.buildSubtasks(task);
       this.emitTask(task);
-      this.startWatch(task);
-      this.enqueueAll(task);
+      void this.launch(task);
     }
     return task;
   }
 
+  /**
+   * 输入边界护栏：命中问候/注入/编码/无资料时直接给出边界应答，不启动排查。
+   * 返回 true 表示已处理并终结任务。
+   */
+  private applyGuard(task: Task): boolean {
+    const settings = this.settingsFor(task);
+    const root = this.resolveWorkspace(task.workspace);
+    const g = classifyInput(task.goal, { workspaceRoot: root, workspaceName: task.workspace });
+    if (g.kind === "none") return false;
+    task.subtasks = [];
+    task.runMode = settings.engine === "pi" ? "real" : "mock";
+    const noMaterial = g.kind === "no_material";
+    // 无资料 = 证据不足（inconclusive）；问候/注入/编码 = 正常完成的安全边界应答（done）。
+    task.status = noMaterial ? "inconclusive" : "done";
+    task.terminalReason = noMaterial ? "no_material" : (("guard_" + g.kind) as TerminalReason);
+    task.failureStage = undefined;
+    task.failureReason = undefined;
+    task.verdict = {
+      rootCause: g.kind === "no_material" ? null : (g.answer || null),
+      confidence: g.confidence,
+      reasoning: [g.reason, "属于输入/安全边界，未启动多智能体排查，直接给出边界应答。"],
+      unresolved: g.kind === "no_material" ? [g.answer || "资料不足"] : []
+    };
+    this.fire(task.id, { type: "verdict", taskId: task.id, verdict: task.verdict });
+    this.emitTask(task);
+    return true;
+  }
+
+  /**
+   * 统一启动/重启入口：
+   *  - mock：直接起表盘 + 队列；
+   *  - 真实 pi：先做中转健康预检，不可用则快速失败（degraded），绝不进入 stuck/仲裁。
+   */
+  private async launch(task: Task): Promise<void> {
+    if (this.tasks.get(task.id) !== task) return;
+    const settings = this.settingsFor(task);
+    if (settings.engine !== "pi") {
+      task.runMode = "mock";
+      if (task.status !== "running") {
+        task.status = "running";
+        this.emitTask(task);
+      }
+      this.startWatch(task);
+      this.enqueueAll(task);
+      return;
+    }
+    if (!settings.apiKey || !settings.modelId) {
+      task.runMode = "real";
+      this.failTask(task, "真实引擎缺少 API Key 或模型设置，未启动", "preflight");
+      return;
+    }
+    if (settings.relayPreflight === false) {
+      task.runMode = "real";
+      task.status = "running";
+      this.emitTask(task);
+      this.startWatch(task);
+      this.enqueueAll(task);
+      return;
+    }
+    task.runMode = "real";
+    task.status = "preflight";
+    this.emitTask(task);
+    const health = await checkRelayHealth({
+      baseUrl: settings.baseUrl,
+      provider: settings.provider,
+      apiKey: settings.apiKey,
+      connectTimeoutMs: settings.connectTimeoutMs,
+      readTimeoutMs: settings.readTimeoutMs,
+      totalTimeoutMs: settings.requestTimeoutMs
+    });
+    if (this.tasks.get(task.id) !== task || task.status !== "preflight") return;
+    if (!health.ok) {
+      task.runMode = "degraded";
+      this.failTask(
+        task,
+        "中转不可用（" + health.stage + "）：" + health.message + "｜本次未执行真实模型，可修复中转或改用 Mock 演示模式",
+        "preflight"
+      );
+      return;
+    }
+    task.status = "running";
+    task.runMode = "real";
+    this.emitTask(task);
+    this.startWatch(task);
+    this.enqueueAll(task);
+  }
+
   async runToCompletion(input: CreateTaskInput): Promise<Task> {
     const task = this.createTask(input);
+    const maxSec = this.settingsFor(task).maxTaskSeconds || 300;
+    const cap = Math.max(20000, maxSec * 1000 + 30000);
     return await new Promise<Task>((resolve) => {
       const started = Date.now();
+      const terminal = (s: string): boolean => s === "done" || s === "failed" || s === "stopped" || s === "timeout" || s === "inconclusive";
       const iv = setInterval(() => {
-        if (task.status === "done" || task.status === "failed" || task.status === "stopped" || Date.now() - started > 180000) {
+        if (terminal(task.status)) {
           clearInterval(iv);
+          resolve(task);
+          return;
+        }
+        if (Date.now() - started > cap) {
+          clearInterval(iv);
+          this.failTask(task, "等待任务结束超时（" + Math.round(cap / 1000) + "s），已强制终止", "watchdog", "timeout");
           resolve(task);
         }
       }, 150);
@@ -262,11 +360,12 @@ export class Orchestrator {
     task.verdict = undefined;
     task.spentUsd = 0;
     task.spentTokens = 0;
+    task.terminalReason = undefined;
     task.status = "running";
+    if (this.applyGuard(task)) return null;
     this.buildSubtasks(task);
     this.emitTask(task);
-    this.startWatch(task);
-    this.enqueueAll(task);
+    void this.launch(task);
     return null;
   }
 
@@ -294,7 +393,7 @@ export class Orchestrator {
     const maxSec = Math.max(2, settings.maxTaskSeconds || 300);
     const stuckSec = Math.max(5, settings.stuckSeconds || 90);
     const deadline = setTimeout(() => {
-      this.failTask(task, "超过任务时限（" + maxSec + "s），已中止");
+      this.failTask(task, "超过任务时限（" + maxSec + "s），已中止", "deadline", "timeout");
     }, maxSec * 1000);
     const stuck = setInterval(() => {
       const now = Date.now();
@@ -330,7 +429,7 @@ export class Orchestrator {
     }
   }
 
-  private failTask(task: Task, reason: string): void {
+  private failTask(task: Task, reason: string, stage = "runtime", kind: "failed" | "timeout" = "failed"): void {
     this.stopWatch(task.id);
     this.queues.set(task.id, []);
     for (const sub of task.subtasks) {
@@ -344,7 +443,10 @@ export class Orchestrator {
         this.emitSub(task, sub);
       }
     }
-    task.status = "failed";
+    task.status = kind === "timeout" ? "timeout" : "failed";
+    task.terminalReason = kind === "timeout" ? "timeout" : "runtime_failure";
+    task.failureStage = stage;
+    task.failureReason = reason;
     task.verdict = {
       rootCause: null,
       confidence: "inconclusive",
@@ -417,7 +519,7 @@ export class Orchestrator {
 
     const cap = this.settingsFor(task).maxCostUsd;
     if (cap > 0 && (task.spentUsd || 0) > cap) {
-      this.failTask(task, "超过费用上限（$" + cap + "），已中止");
+      this.failTask(task, "超过费用上限（$" + cap + "），已中止", "cost");
       return;
     }
     this.pump(task);
@@ -510,6 +612,7 @@ export class Orchestrator {
         this.emitSub(task, sub);
       }
     }
+    task.terminalReason = "user_stopped";
     task.status = "stopped";
     this.emitTask(task);
   }
@@ -526,10 +629,24 @@ export class Orchestrator {
       return String((e as Error).message || e);
     }
     if (task.status !== "running") {
+      // 从停止/失败/超时状态整体重启：把未完成子任务复位为 pending，再走统一 launch（真实引擎仍会先做中转预检）。
       task.verdict = undefined;
+      task.failureReason = undefined;
+      task.failureStage = undefined;
+      task.terminalReason = undefined;
+      for (const s of task.subtasks) {
+        if (s.status !== "done") {
+          s.status = "pending";
+          s.result = undefined;
+          s.progress = [];
+          s.startedAt = undefined;
+          s.endedAt = undefined;
+        }
+      }
       task.status = "running";
-      this.startWatch(task);
       this.emitTask(task);
+      void this.launch(task);
+      return null;
     }
     this.startSubtask(task, sub);
     return null;
@@ -573,7 +690,17 @@ export class Orchestrator {
     }
     const anyDone = task.subtasks.some((s) => s.status === "done" && s.result);
     task.verdict = verdict;
-    task.status = anyDone ? "done" : "failed";
+    if (anyDone) {
+      task.status = "done";
+      task.terminalReason = "model_answer";
+    } else {
+      task.status = "failed";
+      task.terminalReason = "runtime_failure";
+      if (!task.failureReason) {
+        task.failureStage = task.failureStage || "adjudicate";
+        task.failureReason = verdict.reasoning[0] || "无子任务产出可用结论";
+      }
+    }
     this.stopWatch(task.id);
     this.fire(task.id, { type: "verdict", taskId: task.id, verdict });
     this.emitTask(task);

@@ -15,6 +15,9 @@ export interface TaskSummary {
   workspace?: string;
   materialVersion?: string;
   workspaceFingerprint?: string;
+  runMode?: string;
+  failureReason?: string;
+  terminalReason?: string;
 }
 
 export class Store {
@@ -26,7 +29,7 @@ export class Store {
     this.db.exec(
       "CREATE TABLE IF NOT EXISTS tasks (" +
         "id TEXT PRIMARY KEY, goal TEXT NOT NULL, mode TEXT NOT NULL, scope TEXT, workspace TEXT, evidence_root TEXT, material_version TEXT, workspace_fingerprint TEXT, engine TEXT, provider TEXT, model_id TEXT, base_url TEXT, credential_fingerprint TEXT, " +
-        "status TEXT NOT NULL, candidates_json TEXT, verdict_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL" +
+        "status TEXT NOT NULL, run_mode TEXT, failure_stage TEXT, failure_reason TEXT, terminal_reason TEXT, candidates_json TEXT, verdict_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL" +
       ");" +
       "CREATE TABLE IF NOT EXISTS subtasks (" +
         "task_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, scope TEXT NOT NULL, hypothesis TEXT NOT NULL, " +
@@ -41,7 +44,7 @@ export class Store {
     const cols = new Set(
       (this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name)
     );
-    for (const [name, type] of [["workspace", "TEXT"], ["evidence_root", "TEXT"], ["material_version", "TEXT"], ["workspace_fingerprint", "TEXT"], ["engine", "TEXT"], ["provider", "TEXT"], ["model_id", "TEXT"], ["base_url", "TEXT"], ["credential_fingerprint", "TEXT"]] as const) {
+    for (const [name, type] of [["workspace", "TEXT"], ["evidence_root", "TEXT"], ["material_version", "TEXT"], ["workspace_fingerprint", "TEXT"], ["engine", "TEXT"], ["provider", "TEXT"], ["model_id", "TEXT"], ["base_url", "TEXT"], ["credential_fingerprint", "TEXT"], ["run_mode", "TEXT"], ["failure_stage", "TEXT"], ["failure_reason", "TEXT"], ["terminal_reason", "TEXT"]] as const) {
       if (!cols.has(name)) this.db.exec("ALTER TABLE tasks ADD COLUMN " + name + " " + type);
     }
   }
@@ -50,12 +53,12 @@ export class Store {
     const now = Date.now();
     this.db
       .prepare(
-        "INSERT INTO tasks (id,goal,mode,scope,workspace,evidence_root,material_version,workspace_fingerprint,engine,provider,model_id,base_url,credential_fingerprint,status,candidates_json,verdict_json,created_at,updated_at) " +
-          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
+        "INSERT INTO tasks (id,goal,mode,scope,workspace,evidence_root,material_version,workspace_fingerprint,engine,provider,model_id,base_url,credential_fingerprint,status,run_mode,failure_stage,failure_reason,terminal_reason,candidates_json,verdict_json,created_at,updated_at) " +
+          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
           "ON CONFLICT(id) DO UPDATE SET goal=excluded.goal, mode=excluded.mode, scope=excluded.scope, " +
           "workspace=excluded.workspace, evidence_root=excluded.evidence_root, material_version=excluded.material_version, workspace_fingerprint=excluded.workspace_fingerprint, " +
           "engine=excluded.engine, provider=excluded.provider, model_id=excluded.model_id, base_url=excluded.base_url, credential_fingerprint=excluded.credential_fingerprint, " +
-          "status=excluded.status, candidates_json=excluded.candidates_json, verdict_json=excluded.verdict_json, updated_at=excluded.updated_at"
+          "status=excluded.status, run_mode=excluded.run_mode, failure_stage=excluded.failure_stage, failure_reason=excluded.failure_reason, terminal_reason=excluded.terminal_reason, candidates_json=excluded.candidates_json, verdict_json=excluded.verdict_json, updated_at=excluded.updated_at"
       )
       .run(
         task.id,
@@ -72,6 +75,10 @@ export class Store {
         task.baseUrl ?? null,
         task.credentialFingerprint ?? null,
         task.status,
+        task.runMode ?? null,
+        task.failureStage ?? null,
+        task.failureReason ?? null,
+        task.terminalReason ?? null,
         task.candidates ? JSON.stringify(task.candidates) : null,
         task.verdict ? JSON.stringify(task.verdict) : null,
         task.createdAt,
@@ -118,6 +125,10 @@ export class Store {
       modelId: row.model_id == null ? undefined : String(row.model_id),
       baseUrl: row.base_url == null ? undefined : String(row.base_url),
       status: row.status as Task["status"],
+      runMode: row.run_mode == null ? undefined : (String(row.run_mode) as Task["runMode"]),
+      failureStage: row.failure_stage == null ? undefined : String(row.failure_stage),
+      failureReason: row.failure_reason == null ? undefined : String(row.failure_reason),
+      terminalReason: row.terminal_reason == null ? undefined : (String(row.terminal_reason) as Task["terminalReason"]),
       subtasks: subs.map((s) => ({
         id: String(s.id),
         title: String(s.title),
@@ -138,7 +149,7 @@ export class Store {
 
   list(limit = 50): TaskSummary[] {
     const rows = this.db
-      .prepare("SELECT id,goal,mode,status,created_at,verdict_json,engine,model_id,workspace,material_version FROM tasks ORDER BY created_at DESC LIMIT ?")
+      .prepare("SELECT id,goal,mode,status,created_at,verdict_json,engine,model_id,workspace,material_version,run_mode,failure_reason,terminal_reason FROM tasks ORDER BY created_at DESC LIMIT ?")
       .all(limit) as Record<string, unknown>[];
     return rows.map((r) => ({
       id: String(r.id),
@@ -151,7 +162,10 @@ export class Store {
       modelId: r.model_id == null ? undefined : String(r.model_id),
       workspace: r.workspace == null ? undefined : String(r.workspace),
       materialVersion: r.material_version == null ? undefined : String(r.material_version),
-      workspaceFingerprint: r.workspace_fingerprint == null ? undefined : String(r.workspace_fingerprint)
+      workspaceFingerprint: r.workspace_fingerprint == null ? undefined : String(r.workspace_fingerprint),
+      runMode: r.run_mode == null ? undefined : String(r.run_mode),
+      failureReason: r.failure_reason == null ? undefined : String(r.failure_reason),
+      terminalReason: r.terminal_reason == null ? undefined : String(r.terminal_reason)
     }));
   }
 

@@ -57,7 +57,9 @@ export async function testConnection(settings: EngineSettings, cwd: string): Pro
         if (ev.type === "message_update" && ev.assistantMessageEvent && ev.assistantMessageEvent.type === "text_delta") streamed += ev.assistantMessageEvent.delta;
       } catch { /* ignore */ }
     });
-    try { await session.prompt("只回复两个字：可以"); } finally { try { unsub(); } catch { /* ignore */ } }
+    try {
+      await withTimeout(Promise.resolve(session.prompt("只回复两个字：可以")), settings.requestTimeoutMs || 90000, () => { try { session.abort(); } catch { /* ignore */ } });
+    } finally { try { unsub(); } catch { /* ignore */ } }
     const last = typeof session.getLastAssistantText === "function" ? session.getLastAssistantText() : "";
     const out = String(last || streamed || "").trim();
     let usage = "";
@@ -76,16 +78,35 @@ function extractJson(s: string): any | null {
   try { return JSON.parse(s.slice(start, end + 1)); } catch { return null; }
 }
 
+/** 给任意 Promise 加硬超时；超时先触发 abort 真中断，再 reject，避免会话永久挂起变孤儿。 */
+function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { onTimeout(); } catch { /* ignore */ }
+      reject(new Error("请求超时（" + ms + "ms）"));
+    }, Math.max(1000, ms));
+    p.then(
+      (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); },
+      (e) => { if (done) return; done = true; clearTimeout(timer); reject(e); }
+    );
+  });
+}
+
 function retryHint(attempt: number): string {
   return attempt === 0 ? "" : "\n\n注意：上一次输出无法被解析为 JSON。请严格只输出一个 JSON 对象（以 { 开头、} 结尾），不要任何解释或 Markdown 代码块。";
 }
 
 /** 让模型输出 JSON；解析失败自动加纠错提示重试，网络异常也重试。 */
-async function askJson(session: any, prompt: string, maxTries: number, readText: () => string): Promise<{ json: any | null; raw: string }> {
+async function askJson(session: any, prompt: string, maxTries: number, readText: () => string, timeoutMs = 90000): Promise<{ json: any | null; raw: string }> {
   let raw = "";
   for (let i = 0; i < maxTries; i++) {
     try {
-      await session.prompt(prompt + retryHint(i));
+      await withTimeout(Promise.resolve(session.prompt(prompt + retryHint(i))), timeoutMs, () => {
+        try { session.abort(); } catch { /* ignore */ }
+      });
     } catch (e) {
       if (i === maxTries - 1) throw e;
       await new Promise((r) => setTimeout(r, 800));
@@ -143,7 +164,7 @@ export async function runPiSubtask(
     '{"conclusion":"confirmed|refuted|inconclusive","summary":"一句话结论","evidence":[{"type":"code|log|test","locator":"相对文件:行号 或 测试文件#用例","snippet":"关键片段","verify":"如何复核","supports":"这条证据支持哪条判断"}],"doubts":["未验证疑点"]}'
   ].join("\n");
 
-  const { json, raw } = await askJson(session, prompt, 3, readText);
+  const { json, raw } = await askJson(session, prompt, 3, readText, settings.requestTimeoutMs || 90000);
   try { unsub(); } catch { /* ignore */ }
   let cost = { tokens: 0, usd: 0 };
   try { const st = session.getSessionStats(); if (st && st.tokens) cost = { tokens: Number(st.tokens.total || 0), usd: Number(st.cost || 0) }; } catch { /* ignore */ }
@@ -195,7 +216,7 @@ export async function adjudicateWithPi(settings: EngineSettings, task: Task, cwd
     '{"rootCause":"结论或null","confidence":"high|medium|low|inconclusive","reasoning":["依据1","依据2"],"discriminatingCheck":"可选","unresolved":["仍未解决的疑点"]}'
   ].join("\n");
 
-  const { json } = await askJson(session, prompt, 3, readText);
+  const { json } = await askJson(session, prompt, 3, readText, settings.requestTimeoutMs || 90000);
   try { unsub(); } catch { /* ignore */ }
   try { session.dispose(); } catch { /* ignore */ }
   if (!json) throw new Error("仲裁多次未返回可解析 JSON");
@@ -246,7 +267,7 @@ export async function judgeAnswer(
     return { score: clamp01(json.score), passed: json.passed, reason: String(json.reason || "") };
   };
 
-  const first = await askJson(session, prompt, 3, readText);
+  const first = await askJson(session, prompt, 3, readText, settings.requestTimeoutMs || 90000);
   let score = 0, passed = false, reason = "";
   if (!first.json) {
     try { unsub(); } catch { /* ignore */ }
@@ -260,7 +281,7 @@ export async function judgeAnswer(
 
   // 模棱两可（0.35~0.65）时做二次复核取平均；复核返回无效也必须是评分错误。
   if (score >= 0.35 && score <= 0.65) {
-    const second = await askJson(session, prompt, 2, readText);
+    const second = await askJson(session, prompt, 2, readText, settings.requestTimeoutMs || 90000);
     if (!second.json) throw new Error("judge: 复核多次未返回可解析 JSON");
     const parsedSecond = parseJudge(second.json);
     score = clamp01((score + parsedSecond.score) / 2);

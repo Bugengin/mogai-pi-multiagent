@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { getSettings, saveSettings, discoverModels, testSettings } from "./api";
+import { getSettings, saveSettings, discoverModels, testSettings, getRelayHealth } from "./api";
+import type { RelayHealth } from "./api";
 
 export default function SettingsModal(props: { open: boolean; onClose: () => void; onSaved: (engine: string) => void }) {
   const [provider, setProvider] = useState("openai");
@@ -14,6 +15,11 @@ export default function SettingsModal(props: { open: boolean; onClose: () => voi
   const [maxCostUsd, setMaxCostUsd] = useState(1.5);
   const [maxConcurrency, setMaxConcurrency] = useState(4);
   const [stuckSeconds, setStuckSeconds] = useState(90);
+  const [relayPreflight, setRelayPreflight] = useState(true);
+  const [connectTimeoutMs, setConnectTimeoutMs] = useState(5000);
+  const [readTimeoutMs, setReadTimeoutMs] = useState(8000);
+  const [requestTimeoutMs, setRequestTimeoutMs] = useState(90000);
+  const [relay, setRelay] = useState<RelayHealth | null>(null);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -26,7 +32,9 @@ export default function SettingsModal(props: { open: boolean; onClose: () => voi
         setBaseUrl(s.baseUrl || ""); setHasApiKey(s.hasApiKey); setProviders(s.providers || []);
         setMaxTaskSeconds(s.maxTaskSeconds); setMaxCostUsd(s.maxCostUsd);
         setMaxConcurrency(s.maxConcurrency); setStuckSeconds(s.stuckSeconds);
-        setModels([]); setApiKey(""); setMsg("");
+        setRelayPreflight(s.relayPreflight !== false);
+        setConnectTimeoutMs(s.connectTimeoutMs || 5000); setReadTimeoutMs(s.readTimeoutMs || 8000); setRequestTimeoutMs(s.requestTimeoutMs || 90000);
+        setModels([]); setApiKey(""); setMsg(""); setRelay(null);
       } catch (e) { setMsg("读取设置失败：" + String(e)); }
     })();
   }, [props.open]);
@@ -59,13 +67,26 @@ export default function SettingsModal(props: { open: boolean; onClose: () => voi
         maxTaskSeconds: Number(maxTaskSeconds) || 300,
         maxCostUsd: Number(maxCostUsd) || 0,
         maxConcurrency: Number(maxConcurrency) || 4,
-        stuckSeconds: Number(stuckSeconds) || 90
+        stuckSeconds: Number(stuckSeconds) || 90,
+        relayPreflight,
+        connectTimeoutMs: Number(connectTimeoutMs) || 5000,
+        readTimeoutMs: Number(readTimeoutMs) || 8000,
+        requestTimeoutMs: Number(requestTimeoutMs) || 90000
       };
       if (apiKey) body.apiKey = apiKey;
       const s = await saveSettings(body);
       setHasApiKey(s.hasApiKey); setApiKey(""); props.onSaved(s.engine);
       setMsg("已保存 ✓");
     } catch (e) { setMsg("保存失败：" + String(e)); } finally { setBusy(false); }
+  }
+
+  async function checkRelay() {
+    setBusy(true); setMsg("正在探测中转（连接 / 读取 / 总超时）…");
+    try {
+      const r = await getRelayHealth(Math.max(Number(requestTimeoutMs) || 12000, 3000));
+      setRelay(r);
+      setMsg((r.ok ? "✅ " : "❌ ") + r.message + "（阶段：" + r.stage + "，" + r.latencyMs + "ms）");
+    } catch (e) { setMsg("探测失败：" + String(e)); } finally { setBusy(false); }
   }
 
   async function test() {
@@ -135,6 +156,24 @@ export default function SettingsModal(props: { open: boolean; onClose: () => voi
             <div><div className="hint" style={{ margin: 0 }}>最大并发子任务</div><input className="inp" type="number" value={maxConcurrency} onChange={(e) => setMaxConcurrency(Number(e.target.value))} /></div>
             <div><div className="hint" style={{ margin: 0 }}>卡住判定（秒）</div><input className="inp" type="number" value={stuckSeconds} onChange={(e) => setStuckSeconds(Number(e.target.value))} /></div>
           </div>
+        </div>
+
+        <div className="field">
+          <label>中转健康预检与超时</label>
+          <div className="seg">
+            <button className={relayPreflight ? "active" : ""} onClick={() => setRelayPreflight(true)}>启动前预检：开</button>
+            <button className={!relayPreflight ? "active" : ""} onClick={() => setRelayPreflight(false)}>关</button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 8 }}>
+            <div><div className="hint" style={{ margin: 0 }}>连接超时 ms</div><input className="inp" type="number" value={connectTimeoutMs} onChange={(e) => setConnectTimeoutMs(Number(e.target.value))} /></div>
+            <div><div className="hint" style={{ margin: 0 }}>读取超时 ms</div><input className="inp" type="number" value={readTimeoutMs} onChange={(e) => setReadTimeoutMs(Number(e.target.value))} /></div>
+            <div><div className="hint" style={{ margin: 0 }}>单次请求总超时 ms</div><input className="inp" type="number" value={requestTimeoutMs} onChange={(e) => setRequestTimeoutMs(Number(e.target.value))} /></div>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <button className="btn-sm" onClick={checkRelay} disabled={busy}>检查中转健康</button>
+            {relay && <span className="hint" style={{ marginLeft: 8, color: relay.ok ? "#2e9e5b" : "#c0392b" }}>{relay.ok ? "可用" : "不可用"} · {relay.stage} · {relay.latencyMs}ms</span>}
+          </div>
+          <div className="hint">真实引擎启动前会先探测中转；不可用则任务直接判定失败（降级），不会卡在 stuck/仲裁。</div>
         </div>
 
         <div className="modal-actions">

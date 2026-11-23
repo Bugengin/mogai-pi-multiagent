@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getDocuments, importDocument, getDocument, getVersionContent, addDocVersion, deleteDocument } from "./api";
 import type { DocSummary, DocDetail } from "./api";
+import AuthorityDataPanel from "./AuthorityDataPanel";
 
 export default function DataPanel() {
   const [docs, setDocs] = useState<DocSummary[]>([]);
@@ -61,10 +62,12 @@ export default function DataPanel() {
 
   return (
     <div className="eval">
+      <AuthorityDataPanel />
+
       <div className="eval-head">
         <div>
-          <h2>数据中台 · 资料版本库</h2>
-          <div className="muted">导入业务原文即生成快照；同来源内容不变不重复入库，修订自动升版本，旧版本永久保留可回溯。</div>
+          <h2>本地演示资料 · 资料版本库</h2>
+          <div className="muted">数据来源：pi 本地演示缓存（非权威）。导入业务原文即生成快照；同来源内容不变不重复入库，修订自动升版本，旧版本永久保留可回溯。</div>
         </div>
         <button className="btn primary" onClick={() => setShowImport((v) => !v)}>{showImport ? "收起" : "导入资料"}</button>
       </div>

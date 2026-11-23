@@ -68,12 +68,20 @@ export interface Task {
   status:
     | "recon"
     | "awaiting_pick"
+    | "preflight"
     | "planning"
     | "running"
+    | "retrying"
     | "adjudicating"
     | "done"
+    | "inconclusive"
+    | "timeout"
     | "failed"
     | "stopped";
+  runMode?: "real" | "mock" | "degraded" | "historical";
+  failureStage?: string;
+  failureReason?: string;
+  terminalReason?: string;
   subtasks: Subtask[];
   candidates?: Candidate[];
   verdict?: TaskVerdict;
@@ -94,6 +102,9 @@ export interface TaskSummary {
   workspace?: string;
   materialVersion?: string;
   workspaceFingerprint?: string;
+  runMode?: string;
+  failureReason?: string;
+  terminalReason?: string;
 }
 
 export type ServerEvent =
